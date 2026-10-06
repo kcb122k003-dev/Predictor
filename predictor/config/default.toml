@@ -57,7 +57,7 @@ suspicious_symbol_ratio = 0.25
 # Fraction of implausible tokens (random consonant runs, mixed digits/letters) above
 # which text looks like OCR noise.
 suspicious_token_ratio = 0.30
-min_question_words = 3
+min_question_words = 2
 max_question_words = 170
 
 [parsing]
