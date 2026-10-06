@@ -73,6 +73,12 @@ also may might must shall will within without upon via per etc ie eg i.e e.g. re
 using used one two three four five six seven eight nine ten first second third its whose
 """.split())
 
+UNIT_TOKENS = frozenset("""
+mm cm km m kg g mg s ms kpa mpa gpa pa n kn j kj mj w kw mw mol kmol l ml lit litre litres liter liters k
+rpm hz khz v kv mv a ma ohm bar atm psi ft lb lbs hr hrs h min mins sec secs deg degc degf kmph kcal cal btu
+ppm mmhg nm um
+""".split())
+
 TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:['’][a-z]+)?|\d+(?:\.\d+)?")
 
 
@@ -199,7 +205,9 @@ def content_terms(text: str, extra_stopwords: Iterable[str] = (), *, keep_number
             continue
         if tok[0].isdigit() and not keep_numbers:
             continue
-        if len(tok) < 2:
+        if len(tok) < 2 or tok in UNIT_TOKENS:
+            continue
+        if len(tok) <= 3 and any(ch.isdigit() for ch in tok):  # m2, m3, s2: units, not topics
             continue
         st = stem(tok)
         if st in extra_stems:

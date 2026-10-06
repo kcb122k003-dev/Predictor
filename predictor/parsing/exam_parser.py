@@ -24,8 +24,10 @@ NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, 
                 "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "fifteen": 15, "twenty": 20}
 
 RE_OR = re.compile(r"^[\s\-–—_*=.(\[]*\b(?:or|OR|Or)\b[\s\-–—_*=.)\]]*$")
+# Section headers are capitalised ("Group A", "SECTION B", "Part II"); "section 2 of the pipe" is text.
 RE_SECTION = re.compile(
-    r"^(?:group|section|part)\s*[-–:.]?\s*([A-Z]|[IVX]{1,4}|\d{1,2})(?![a-z])\s*[:.\-–)]?\s*(.*)$", re.IGNORECASE)
+    r"^(?:Group|GROUP|Section|SECTION|Part|PART)\s*[-–:.]?\s*([A-Z]|[IVX]{1,4}|[ivx]{1,4}|\d{1,2})(?![a-z])"
+    r"\s*([:.\-–)(\[].*|(?:[Aa]ttempt|[Aa]nswer|ATTEMPT|All|ALL|Any)\b.*|)$")
 RE_INSTRUCTION = re.compile(
     r"^\W*(?:attempt|answer)\s+(?:any|all|the following|question)|^\W*all questions (?:carry|are)|"
     r"^\W*(?:the )?figures? in the (?:right[- ])?margin|^\W*candidates? (?:are|is)|"
@@ -303,7 +305,7 @@ class ExamParser:
             return "or", {}
         m = RE_SECTION.match(t)
         if m and len(t) < 120:
-            return "section", {"label": m.group(1).upper(), "rest": m.group(2).strip()}
+            return "section", {"label": m.group(1).upper(), "rest": m.group(2).strip(" :.-–)")}
         if RE_INSTRUCTION.match(t):
             return "instruction", {}
         m = RE_BARE_MARKS.match(t)

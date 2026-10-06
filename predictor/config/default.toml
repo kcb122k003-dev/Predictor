@@ -100,6 +100,15 @@ keyword_weight = 0.4
 # A second topic is also assigned when its score is at least this fraction of the best.
 multi_topic_ratio = 0.88
 max_topics_per_question = 2
+# Laboratory nodes compete with theory topics ("Determination of metacentric height").
+# Their score is multiplied by this unless the question mentions experiments or apparatus.
+lab_penalty = 0.6
+# Feedback pass: topic vectors are moved toward questions mapped to them with status A
+# (by this weight) when at least feedback_min_questions such questions exist. This helps
+# numerical questions whose wording shares few words with the syllabus line.
+feedback_weight = 0.35
+feedback_min_questions = 2
+feedback_margin = 0.04
 # 0 = lenient (A, B and C influence predictions), 0.5 = A and validated B,
 # 1 = strict (only A). See docs/USER_GUIDE.md.
 strictness = 0.5
