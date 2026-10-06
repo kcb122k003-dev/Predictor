@@ -381,3 +381,47 @@ Integration and regression tests use a synthetic course generated from a known r
 process (`examples/demo_generator.py`), so tests can check that models recover planted
 patterns (for example a topic that rotates every two exams) and that an out-of-syllabus
 topic from an old syllabus never reaches the predictions.
+
+---
+
+## 15. Implementation status (as built)
+
+| Spec area | Where | Status |
+|---|---|---|
+| Ingestion: PDF (digital, scanned, mixed), DOCX, images, text; hashing; duplicates (file and paper level) | `ingestion/`, `services/ingest_service.py` | done |
+| OCR with deskew, denoise, contrast, binarisation, rotation detection, confidence | `ocr/` | done |
+| Quality flags (low confidence, garbled symbols, implausible words, broken equations) | `preprocessing/quality.py` | done |
+| Equations kept raw and normalised | `preprocessing/textnorm.py` | done (text equations; no math OCR) |
+| Question tree: sections, numbering styles, marks, OR groups, optional questions, MCQ, inline parts | `parsing/exam_parser.py` | done |
+| Metadata incl. Bikram Sambat years, sessions, exam types | `parsing/metadata.py` | done |
+| Extensible question-type taxonomy | `parsing/question_types.py`, `config/taxonomy.json` | done (rule-based) |
+| Syllabus tree, merge, source references, versions | `syllabus/` | done |
+| Alignment with A/B/C/D and strictness | `syllabus/alignment.py` | done |
+| Exact / paraphrase / concept / topic recurrence | `topic_modeling/families.py`, panel features | done |
+| Temporal analysis, hazard, Markov, rotation test, co-occurrence, marks, format transitions | `temporal/`, `features/`, `prediction/type_forecast.py` | done |
+| Candidate models, gates, tuned variants, ensemble | `models/` | done |
+| Expanding-window backtest, metrics, one-SE selection, leakage audit | `evaluation/backtest.py` | done |
+| Calibration with validity check and bands | `models/calibration.py` | done |
+| Ablation (leave-one-out, staged) and syllabus-filter check | `evaluation/ablation.py` | done |
+| Ranking, categories, evidence, contributions, why-not, excluded | `prediction/ranking.py` | done |
+| Grounded formulations and paper simulation | `generation/` | done |
+| UI, charts with click-through, search, export, settings | `app/`, `ui/`, `search/`, `export/` | done |
+| Install scripts, CLI, docs, tests | `scripts/`, `cli.py`, `docs/`, `tests/` | done |
+| Examiner tendencies | `exam.examiner` field | stored and editable through the API only; no analysis, by design (D6) |
+| Historical syllabus per backtest fold | `SyllabusVersion` | partial: historical versions explain excluded questions; the current syllabus is the candidate set for every fold (D5) |
+| Learned question-type classifier from user corrections | none | future work |
+| Cross-course transfer | none | future work; courses are fully isolated |
+| Math OCR, handwriting recognition | none | future work (D9) |
+
+### Measured against the success metrics (synthetic demo, 12 papers)
+
+| Target (section 12) | Result |
+|---|---|
+| Segmentation on digital PDFs and DOCX | 144 of 144 demo questions found with correct marks across PDF, DOCX and text papers; fixture tests cover TU, KU and generic formats |
+| Year detection | 12 of 12 demo papers; fixture tests cover AD, BS and file-name years |
+| Alignment top-1 accuracy at least 85%, out-of-syllabus never A | 91.4% (128 of 140); 4 of 4 old-syllabus questions marked D; 0 in-syllabus questions marked D |
+| Selected model at least as good as the best simple baseline | selected Recent-window frequency (NDCG@11 0.712), best simple baselines 0.698 to 0.712, random 0.461 |
+| Probabilities shown only when they beat the base rate | nested Brier 0.199 vs 0.251 base rate, so probabilities are shown |
+| Leakage audit passes | passes for all 19 model variants |
+| No prediction or formulation outside the syllabus | asserted in `tests/integration/test_end_to_end.py` |
+| A 15-paper course in under 60 s | 12 papers analysed in about 7 s (4-core container, TF-IDF backend); ingestion under 1 s for digital files |

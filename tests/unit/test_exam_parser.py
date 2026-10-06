@@ -134,3 +134,17 @@ def test_numbers_inside_text_do_not_start_questions(settings):
 def test_no_questions_warns(settings):
     parsed = ExamParser(settings).parse(pages_from("Just some text without numbering."), "x.pdf")
     assert parsed.questions == [] and parsed.warnings
+
+
+def test_wrapped_decimal_is_not_dotted_numbering(settings):
+    paper = """1. a) The space between two plates 12 mm apart is filled with oil of viscosity
+      1.5 Pa.s. Calculate the shear stress when the plate moves at 2.5 m/s.    [6]
+   b) Derive an expression for the metacentric height. [8]
+2. Explain the following:
+2.1 State Raoult's law. (4)
+2.2 Explain osmosis. (6)
+"""
+    parsed = ExamParser(settings).parse(pages_from(paper), "x.pdf")
+    nodes = _nodes(parsed)
+    assert "1.5 Pa.s. Calculate the shear stress" in nodes["1(a)"].text and nodes["1(a)"].marks == 6
+    assert nodes["2.1"].marks == 4 and nodes["2.2"].marks == 6

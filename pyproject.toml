@@ -48,7 +48,7 @@ predictor = "predictor.cli:main"
 include = ["predictor*"]
 
 [tool.setuptools.package-data]
-predictor = ["config/*.toml", "config/*.json", "ui/static/*", "ui/static/js/*"]
+predictor = ["config/*.toml", "config/*.json", "config/*.txt", "ui/static/*", "ui/static/js/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -40,16 +40,12 @@ export async function renderReview(main, course, { refreshCourse }) {
           return box;
         } },
     ], exams, {
-      onRowClick: (e) => { selected = e.id; loadTree(); highlight(); },
+      onRowClick: (e) => { selected = e.id; loadExams(); loadTree(); },
       rowClass: (e) => e.id === selected ? "selected" : "",
     }));
     examsBox.appendChild(h("p", { class: "help" }, "Order decides the time sequence used for recency and backtesting. ",
       "It is computed from year and session; edit it when two papers share a year. Click a row to review its questions."));
     return exams;
-  }
-
-  function highlight() {
-    examsBox.querySelectorAll("tr").forEach(tr => tr.classList.remove("selected"));
   }
 
   function conf(e, key) {

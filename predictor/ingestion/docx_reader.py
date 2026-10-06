@@ -130,18 +130,51 @@ def _paragraph_text(p_el) -> tuple[str, int]:
     return "".join(parts), breaks
 
 
-def _numbering_of(p_el) -> tuple[str | None, int]:
-    ppr = p_el.find(f"{W}pPr")
+def _numpr(ppr) -> tuple[str | None, int | None]:
     if ppr is None:
-        return None, 0
+        return None, None
     numpr = ppr.find(f"{W}numPr")
     if numpr is None:
-        return None, 0
+        return None, None
     num_id_el = numpr.find(f"{W}numId")
     ilvl_el = numpr.find(f"{W}ilvl")
-    if num_id_el is None:
+    return (num_id_el.get(f"{W}val") if num_id_el is not None else None,
+            int(ilvl_el.get(f"{W}val")) if ilvl_el is not None else None)
+
+
+class _StyleNumbering:
+    """Numbering defined on paragraph styles ("List Number", "List Number 2"), following basedOn."""
+
+    def __init__(self, document: Any):
+        self.styles: dict[str, Any] = {}
+        try:
+            for st in document.styles.element.findall(f"{W}style"):
+                self.styles[st.get(f"{W}styleId")] = st
+        except Exception:
+            pass
+
+    def lookup(self, style_id: str | None, depth: int = 0) -> tuple[str | None, int | None]:
+        if not style_id or style_id not in self.styles or depth > 8:
+            return None, None
+        st = self.styles[style_id]
+        num_id, ilvl = _numpr(st.find(f"{W}pPr"))
+        if num_id is not None:
+            return num_id, ilvl
+        based = st.find(f"{W}basedOn")
+        return self.lookup(based.get(f"{W}val") if based is not None else None, depth + 1)
+
+
+def _numbering_of(p_el, style_numbering: "_StyleNumbering | None" = None) -> tuple[str | None, int]:
+    ppr = p_el.find(f"{W}pPr")
+    num_id, ilvl = _numpr(ppr)
+    if num_id is None and style_numbering is not None and ppr is not None:
+        style = ppr.find(f"{W}pStyle")
+        s_num, s_ilvl = style_numbering.lookup(style.get(f"{W}val") if style is not None else None)
+        num_id = s_num
+        ilvl = ilvl if ilvl is not None else s_ilvl
+    if num_id is None:
         return None, 0
-    return num_id_el.get(f"{W}val"), int(ilvl_el.get(f"{W}val")) if ilvl_el is not None else 0
+    return num_id, ilvl or 0
 
 
 def _style_name(document: Any, p_el) -> str:
@@ -163,6 +196,7 @@ def extract_docx(path: Path) -> ExtractionResult:
 
     document = docx.Document(str(path))
     numbering = _Numbering(document)
+    style_numbering = _StyleNumbering(document)
     pages: dict[int, list[str]] = defaultdict(list)
     headings: list[dict[str, Any]] = []
     page = 1
@@ -170,7 +204,7 @@ def extract_docx(path: Path) -> ExtractionResult:
     for child in body.iterchildren():
         if child.tag == f"{W}p":
             text, breaks = _paragraph_text(child)
-            num_id, ilvl = _numbering_of(child)
+            num_id, ilvl = _numbering_of(child, style_numbering)
             label = numbering.label(num_id, ilvl) if num_id and num_id != "0" else ""
             style = _style_name(document, child)
             indent = "    " * ilvl if label else ""
@@ -186,7 +220,7 @@ def extract_docx(path: Path) -> ExtractionResult:
                     cell_lines = []
                     for p in cell.iter(f"{W}p"):
                         t, _ = _paragraph_text(p)
-                        num_id, ilvl = _numbering_of(p)
+                        num_id, ilvl = _numbering_of(p, style_numbering)
                         label = numbering.label(num_id, ilvl) if num_id and num_id != "0" else ""
                         t = f"{label} {t}".strip() if label else t.strip()
                         if t:

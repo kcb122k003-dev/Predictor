@@ -44,6 +44,8 @@ RE_NUM_SUB = re.compile(r"^(?:Q(?:uestion)?\s*\.?\s*(?:No\.?\s*)?)?(\d{1,2})\s*[
 RE_NUM_SUB2 = re.compile(r"^(\d{1,2})\s*[.)]\s+\(?([a-h])\s*[).]\s+(.*)$")
 RE_DOTTED = re.compile(r"^(?:Q\s*\.?\s*)?(\d{1,2})\.(\d{1,2})\s*[.)]?\s+(?=[A-Z(\"'])(.*)$")
 RE_NUM = re.compile(r"^(\d{1,2})\s*[.)](?!\d)\s*(.*)$")
+RE_UNIT_START = re.compile(r"^(?:k?Pa|MPa|kN|N|J|kJ|W|kW|m|cm|mm|km|kg|g|s|K|bar|atm|L|ml|mol|rpm|V|A|Hz|%)"
+                           r"(?:[./^\s\d]|$)")
 RE_NUM_BARE = re.compile(r"^(\d{1,2})\s+(?=[A-Z(])(.*)$")
 RE_LETTER_PAREN = re.compile(r"^\(\s*([a-zA-Z])\s*\)\s*(.*)$")
 RE_LETTER = re.compile(r"^([a-z])\s*[).]\s+(.*)$")
@@ -494,10 +496,16 @@ class ExamParser:
                 continuing_same = (current_main is not None and num == last_main_num
                                    and current_main.label == str(num) and not pending_or)
                 if kind == "dotted" and continuing_same:
-                    current_l2 = new_child(current_main, f"{num}.{info['sub']}", "dotted", info["rest"], ln)
-                    current_l3 = None
-                    l2_kind = "dotted"
-                    continue
+                    # "1.5 Pa.s ..." on a wrapped line is a number, not sub-question 1.5. A dotted label must
+                    # continue the sequence (n.1, then n.2, ...) and must not be followed by a unit.
+                    prev_dotted = [c for c in current_main.children if c.kind == "dotted"]
+                    expected_sub = int(prev_dotted[-1].label.split(".")[-1]) + 1 if prev_dotted else 1
+                    if int(info["sub"]) == expected_sub and not RE_UNIT_START.match(info["rest"]):
+                        current_l2 = new_child(current_main, f"{num}.{info['sub']}", "dotted", info["rest"], ln)
+                        current_l3 = None
+                        l2_kind = "dotted"
+                        continue
+                    kind = "text"
                 if kind == "main_sub" and continuing_same:
                     # "1(b)" after "1(a)": another part of the same question.
                     sub = info["sub"].lower()
@@ -505,7 +513,7 @@ class ExamParser:
                     current_l2 = new_child(current_main, sub, sub_kind, info["rest"], ln)
                     current_l3 = None
                     continue
-                if acceptable:
+                if acceptable and kind != "text":
                     if kind == "main":
                         new_main(num, info["rest"], ln, strength)
                     else:

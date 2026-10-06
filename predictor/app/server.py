@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -31,9 +32,16 @@ def _plotly_js() -> Path | None:
 
 def create_app(ctx: AppContext | None = None, *, run_jobs_inline: bool = False) -> FastAPI:
     ctx = ctx or AppContext.create()
-    app = FastAPI(title="Exam Predictor", version=__version__, docs_url="/api/docs", redoc_url=None)
+    jobs = JobRunner()
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        yield
+        jobs.shutdown()
+
+    app = FastAPI(title="Exam Predictor", version=__version__, docs_url="/api/docs", redoc_url=None, lifespan=lifespan)
     app.state.ctx = ctx
-    app.state.jobs = JobRunner()
+    app.state.jobs = jobs
     app.state.inline = run_jobs_inline
 
     @app.exception_handler(KeyError)
@@ -64,9 +72,4 @@ def create_app(ctx: AppContext | None = None, *, run_jobs_inline: bool = False) 
         return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-
-    @app.on_event("shutdown")
-    def _shutdown() -> None:  # pragma: no cover - server lifecycle
-        app.state.jobs.shutdown()
-
     return app
