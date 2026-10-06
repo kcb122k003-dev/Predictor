@@ -54,7 +54,7 @@ _configured = False
 
 
 def configure_logging(level: str = "INFO", log_dir: Path | None = None, *, json_file: bool = True,
-                      max_bytes: int = 5_000_000, backups: int = 3) -> None:
+                      max_bytes: int = 5_000_000, backups: int = 3, console_level: str = "WARNING") -> None:
     """Configure the ``predictor`` logger once (safe to call repeatedly)."""
     global _configured
     root = logging.getLogger(ROOT)
@@ -62,6 +62,7 @@ def configure_logging(level: str = "INFO", log_dir: Path | None = None, *, json_
     if _configured:
         return
     console = logging.StreamHandler()
+    console.setLevel(console_level.upper())
     console.setFormatter(ConsoleFormatter())
     root.addHandler(console)
     if log_dir is not None and json_file:

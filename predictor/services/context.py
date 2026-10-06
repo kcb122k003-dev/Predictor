@@ -28,7 +28,8 @@ class AppContext:
         root.mkdir(parents=True, exist_ok=True)
         if log:
             configure_logging(settings.logging.level, root / "logs", json_file=bool(settings.logging.json_file),
-                              max_bytes=int(settings.logging.max_bytes), backups=int(settings.logging.backups))
+                              max_bytes=int(settings.logging.max_bytes), backups=int(settings.logging.backups),
+                              console_level=str(settings.logging.console_level))
         db = Database(":memory:" if in_memory else root / "predictor.sqlite3")
         return cls(settings=settings, db=db, data_dir=root)
 

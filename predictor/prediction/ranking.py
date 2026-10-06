@@ -189,7 +189,7 @@ def _facts(panel: Panel, fm: FeatureMatrix, i: int, haz, mapping_confidence, rot
         facts["exact_repeats"] = int(panel.exact_repeat[:, i].sum())
         facts["paraphrase_repeats"] = int(panel.para_repeat[:, i].sum())
     if haz is not None and idx.size:
-        gap = T - idx[-1] + 1  # gap if it appears in the next exam
+        gap = T - idx[-1]  # gap if it appears in the next exam (1 = it was in the latest exam)
         g = int(min(gap, haz.max_gap))
         if g in haz.counts:
             hits, opps = haz.counts[g]
@@ -269,7 +269,10 @@ def _evidence_lines(panel: Panel, f: dict[str, Any], location: str | None) -> li
         lines.append(line + ".")
     tf = f.get("type_forecast")
     if tf and tf.get("format"):
-        lines.append(f"Predicted format if it appears: {tf['format']} ({_fmt_pct(tf['probability'])}).")
+        source = {"global": "the course-wide format mix", "topic": "this topic's own recent formats",
+                  "transition": "this topic's recent formats and format transitions"}.get(tf.get("method"), "")
+        lines.append(f"Predicted format if it appears: {tf['format']} ({_fmt_pct(tf['probability'])}"
+                     + (f", from {source}, which forecast formats best in the backtest" if source else "") + ").")
     if f.get("exact_repeats"):
         lines.append(f"{f['exact_repeats']} question(s) on this topic repeated an earlier question almost word for word.")
     if f.get("mapping_confidence") is not None:

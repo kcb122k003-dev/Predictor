@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Exam Predictor</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%232f5f9e'/%3E%3Cpath d='M8 22l5-7 4 4 7-10' stroke='white' stroke-width='3' fill='none'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/vendor/plotly.min.js" defer></script>
+  <script type="module" src="/static/js/app.js"></script>
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="#/">Exam Predictor <span>local and offline</span></a>
+    <div class="course-name" id="course-name"></div>
+    <nav>
+      <a href="#/">Courses</a>
+      <a href="#/settings">Settings</a>
+      <a href="#/help">Help</a>
+    </nav>
+  </header>
+  <div class="layout" id="layout">
+    <aside class="side" id="side"></aside>
+    <main id="main"><div class="empty">Loading...</div></main>
+  </div>
+  <div id="toasts"></div>
+  <noscript>Exam Predictor needs JavaScript enabled in your browser. It runs only on this computer.</noscript>
+</body>
+</html>

@@ -15,7 +15,10 @@ open_browser = true
 allow_external_services = false
 
 [logging]
+# Level written to the JSON log file (<data_dir>/logs/predictor.log).
 level = "INFO"
+# Level printed in the terminal.
+console_level = "WARNING"
 json_file = true
 max_bytes = 5_000_000
 backups = 3
