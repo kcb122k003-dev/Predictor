@@ -73,7 +73,8 @@ def supporting_signals(fm: FeatureMatrix, i: int, base_rate: float) -> list[str]
 def build_topic_predictions(panel: Panel, report: BacktestReport, fm: FeatureMatrix, settings: Settings, *,
                             explain_output=None, mapping_confidence: np.ndarray | None = None,
                             rotation: dict[int, Any] | None = None, type_forecast: dict[int, Any] | None = None,
-                            syllabus_location: dict[int, str] | None = None) -> list[TopicPrediction]:
+                            syllabus_location: dict[int, str] | None = None,
+                            lab_items: set[int] | None = None) -> list[TopicPrediction]:
     cfg = settings.prediction
     scores = np.asarray(report.final_scores, dtype=float)
     K = len(scores)
@@ -115,6 +116,7 @@ def build_topic_predictions(panel: Panel, report: BacktestReport, fm: FeatureMat
             else:
                 cat = CATEGORY_ORDER[3]
         facts = _facts(panel, fm, i, haz, mapping_confidence, rotation, type_forecast)
+        facts["is_lab"] = bool(lab_items and panel.item_ids[i] in lab_items)
         conf = _confidence(T, settings, facts, p, lo, hi, probs is not None)
         evidence = _evidence_lines(panel, facts, syllabus_location.get(panel.item_ids[i]) if syllabus_location else None)
         preds.append(TopicPrediction(
@@ -283,7 +285,9 @@ def _why_not(pred: TopicPrediction, panel: Panel, haz, base_rate: float, mapping
     T = f["exams"]
     if T == 0:
         return out
-    if f["appearances"] == 0:
+    if f["appearances"] == 0 and f.get("is_lab"):
+        out.append(f"Laboratory or practical item: none of the {T} written papers asked about it.")
+    elif f["appearances"] == 0:
         out.append(f"No history: never appeared in the {T} supplied exams.")
     elif f["appearances"] <= max(1, round(0.2 * T)):
         out.append(f"Rare historically: appeared in only {f['appearances']} of {T} exams.")

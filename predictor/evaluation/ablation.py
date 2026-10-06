@@ -14,7 +14,7 @@ against the filtered ground truth.
 from __future__ import annotations
 
 import math
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 
@@ -92,16 +92,18 @@ def run_ablation(panel: Panel, settings: Settings, store: FeatureStore, targets:
                      "(staged). A delta within about one standard error is not a reliable difference.")}
 
 
-def syllabus_filter_check(model_factory: Callable[[], BaseModel], filtered: Panel, unfiltered: Panel,
-                          settings: Settings, targets: list[int], k: int, primary: str) -> dict[str, Any]:
+def syllabus_filter_check(filtered_predictions: dict[int, np.ndarray], unfiltered_predictions: dict[int, np.ndarray],
+                          filtered: Panel, unfiltered: Panel, targets: list[int], k: int, primary: str,
+                          model_display: str) -> dict[str, Any]:
+    """Score the selected model with and without the syllabus filter against the filtered ground truth."""
+    targets = [t for t in targets if t in filtered_predictions and t in unfiltered_predictions]
     if not targets:
         return {"available": False, "reason": "No backtest folds are available."}
-    with_filter = _evaluate(model_factory(), filtered, FeatureStore(filtered, settings), settings, targets, k, primary)
-    without = _evaluate(model_factory(), unfiltered, FeatureStore(unfiltered, settings), settings, targets, k,
-                        primary, labels=filtered.Y)
+    with_filter = {t: ranking_metrics(filtered_predictions[t], filtered.Y[t], k)[primary] for t in targets}
+    without = {t: ranking_metrics(unfiltered_predictions[t], filtered.Y[t], k)[primary] for t in targets}
     extra = float((unfiltered.Y - filtered.Y).clip(min=0).sum())
     return {
-        "available": True, "metric": f"{primary}@{k}",
+        "available": True, "metric": f"{primary}@{k}", "model": model_display,
         "with_filter": _summary("With syllabus filter", with_filter, None),
         "without_filter": _summary("Without syllabus filter", without, with_filter),
         "extra_appearances_without_filter": int(extra),

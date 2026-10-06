@@ -35,6 +35,7 @@ RE_OBJECTIVE_LEAD = re.compile(
     r"^\W*(?:to|understand|know|learn|apply|analy[sz]e|explain|describe|develop|identify|demonstrate|gain|"
     r"familiari[sz]e|introduce|provide|enable|equip|impart|acquaint|students?|be able|make|build|use)\b",
     re.IGNORECASE)
+RE_CONNECTOR_END = re.compile(r"\b(?:and|or|of|the|in|on|for|to|with|between|a|an|its|their)$", re.IGNORECASE)
 LAB_HEADINGS = re.compile(r"^\W*(?:practicals?|laboratory(?: work| works| exercises)?|lab(?:oratory)? work|"
                           r"list of experiments|experiments)\W*$", re.IGNORECASE)
 KIND_PATTERNS = {
@@ -176,6 +177,27 @@ class SyllabusParser:
         self.split_inline = bool(cfg.split_inline_concepts)
         self.max_concept_words = int(cfg.max_concept_words)
 
+    def _is_structural(self, line: str) -> bool:
+        return bool(RE_UNIT.match(line) or RE_NUMBERED.match(line) or _list_item(line) is not None
+                    or self._is_stop_heading(line) or LAB_HEADINGS.match(line) or RE_OBJECTIVES.match(line))
+
+    def _joined_lines(self, pages: list[PageText]) -> list[tuple[int, int, str]]:
+        """Re-join lines that a PDF wrapped ("..., displacement thickness and" + "momentum thickness"),
+        including across page breaks. Returns (page, line, text) using the first line's location."""
+        out: list[tuple[int, int, str]] = []
+        for page in pages:
+            for line_no, raw in enumerate(page.text.split("\n"), start=1):
+                line = raw.strip()
+                if not line:
+                    continue
+                if out and not self._is_structural(line):
+                    prev = out[-1][2].rstrip()
+                    if prev and (prev[-1] in ",;&" or RE_CONNECTOR_END.search(prev) or line[0].islower()):
+                        out[-1] = (out[-1][0], out[-1][1], f"{prev} {line}")
+                        continue
+                out.append((page.page_no, line_no, raw))
+        return out
+
     def _is_stop_heading(self, line: str) -> bool:
         core = re.sub(r"[^a-z ]", "", line.lower()).strip()
         if not core or len(core.split()) > 5:
@@ -239,144 +261,143 @@ class SyllabusParser:
                 result.roots.append(node)
             stack.append(node)
 
-        for page in pages:
-            for line_no, raw in enumerate(page.text.split("\n"), start=1):
-                line = raw.strip()
-                if not line:
-                    continue
-                ref = {"file": filename, "file_id": file_id, "page": page.page_no, "line": line_no,
-                       "text": line[:240]}
+        for page_no, line_no, raw in self._joined_lines(pages):
+            line = raw.strip()
+            if not line:
+                continue
+            ref = {"file": filename, "file_id": file_id, "page": page_no, "line": line_no,
+                   "text": line[:240]}
 
-                if LAB_HEADINGS.match(line):
-                    in_stop = False
-                    lab_root = SyllabusNode(title="Laboratory / practical work", depth=1, kinds=["lab"],
-                                            source_refs=[ref])
-                    stack.clear()
-                    attach(lab_root)
-                    objectives_target = None
-                    continue
-                if self._is_stop_heading(line):
-                    in_stop = True
-                    stop_kind = line.lower()
-                    lowered = line.lower()
-                    objectives_target = "course" if "objective" in lowered or "outcome" in lowered else None
-                    continue
+            if LAB_HEADINGS.match(line):
+                in_stop = False
+                lab_root = SyllabusNode(title="Laboratory / practical work", depth=1, kinds=["lab"],
+                                        source_refs=[ref])
+                stack.clear()
+                attach(lab_root)
+                objectives_target = None
+                continue
+            if self._is_stop_heading(line):
+                in_stop = True
+                stop_kind = line.lower()
+                lowered = line.lower()
+                objectives_target = "course" if "objective" in lowered or "outcome" in lowered else None
+                continue
 
-                unit_m = RE_UNIT.match(line)
-                if unit_m and len(line) < 160 and not RE_HOURS.fullmatch(unit_m.group(2) or ""):
-                    in_stop = False
-                    lab_root = None
-                    in_unit_scheme = True
-                    current_unit_no = _roman_or_int(unit_m.group(1))
-                    rest = unit_m.group(2).strip()
-                    stack.clear()
-                    node = self._make_node(rest or f"Unit {unit_m.group(1)}", 1, unit_m.group(1), ref)
-                    attach(node)
-                    pending_title_for = node if not rest or RE_HOURS.fullmatch(rest.strip()) else None
-                    objectives_target = None
-                    continue
+            unit_m = RE_UNIT.match(line)
+            if unit_m and len(line) < 160 and not RE_HOURS.fullmatch(unit_m.group(2) or ""):
+                in_stop = False
+                lab_root = None
+                in_unit_scheme = True
+                current_unit_no = _roman_or_int(unit_m.group(1))
+                rest = unit_m.group(2).strip()
+                stack.clear()
+                node = self._make_node(rest or f"Unit {unit_m.group(1)}", 1, unit_m.group(1), ref)
+                attach(node)
+                pending_title_for = node if not rest or RE_HOURS.fullmatch(rest.strip()) else None
+                objectives_target = None
+                continue
 
-                if in_stop and ("objective" in stop_kind or "outcome" in stop_kind):
-                    # Objectives end where the topic list starts: a numbered line that carries hours
-                    # or does not read like an objective ("To understand ...").
-                    num_m = RE_NUMBERED.match(line)
-                    if num_m and (RE_HOURS.search(line) or not RE_OBJECTIVE_LEAD.match(num_m.group(2))):
-                        in_stop = False
-                        objectives_target = None
-                if in_stop:
-                    if "objective" in stop_kind or "outcome" in stop_kind:
-                        item = re.sub(r"^\s*(?:\d{1,2}[.)]|[a-z][.)]|[•\-*•])\s*", "", line)
-                        if item:
-                            result.objectives.append(item)
-                    elif "marks" in stop_kind or "evaluation" in stop_kind:
-                        m = re.match(r"^(?:chapter|unit)?\s*(\d{1,2}(?:\s*(?:,|&|and|-)\s*\d{1,2})*)\b.*?"
-                                     r"(?:(\d{1,3})\s+)?(\d{1,3})\s*\*?$", line, re.IGNORECASE)
-                        if m:
-                            chapters = [int(x) for x in re.findall(r"\d{1,2}", m.group(1))]
-                            hours = float(m.group(2)) if m.group(2) else None
-                            marks = float(m.group(3))
-                            for ch in chapters:
-                                marks_table[ch] = (hours, marks / len(chapters))
-                    continue
-
-                obj_m = RE_OBJECTIVES.match(line)
-                if obj_m:
-                    objectives_target = stack[0] if stack else "course"
-                    if obj_m.group(1).strip():
-                        self._add_objective(result, objectives_target, obj_m.group(1).strip())
-                    continue
-
-                style = heading_texts.get(line.lower(), "")
-                if style.lower() in ("heading 1", "title") and not RE_NUMBERED.match(line):
-                    stack.clear()
-                    attach(self._make_node(line, 1, "", ref))
-                    in_unit_scheme = True
-                    objectives_target = None
-                    continue
-
+            if in_stop and ("objective" in stop_kind or "outcome" in stop_kind):
+                # Objectives end where the topic list starts: a numbered line that carries hours
+                # or does not read like an objective ("To understand ...").
                 num_m = RE_NUMBERED.match(line)
-                if num_m and not RE_HOURS.fullmatch(num_m.group(2).strip()):
-                    number = num_m.group(1)
-                    parts = number.split(".")
-                    if in_unit_scheme:
-                        if len(parts) > 1 and current_unit_no is not None and int(parts[0]) == current_unit_no:
-                            depth = len(parts)
-                        else:
-                            depth = len(parts) + 1
-                    else:
-                        depth = len(parts)
-                    if lab_root is not None and stack and stack[0] is lab_root:
-                        depth = max(depth, 2)
-                    node = self._make_node(num_m.group(2), depth, number, ref)
-                    attach(node)
-                    if not in_unit_scheme and len(parts) == 1:
-                        current_unit_no = int(parts[0])
-                    pending_title_for = None
+                if num_m and (RE_HOURS.search(line) or not RE_OBJECTIVE_LEAD.match(num_m.group(2))):
+                    in_stop = False
                     objectives_target = None
-                    continue
+            if in_stop:
+                if "objective" in stop_kind or "outcome" in stop_kind:
+                    item = re.sub(r"^\s*(?:\d{1,2}[.)]|[a-z][.)]|[•\-*•])\s*", "", line)
+                    if item:
+                        result.objectives.append(item)
+                elif "marks" in stop_kind or "evaluation" in stop_kind:
+                    m = re.match(r"^(?:chapter|unit)?\s*(\d{1,2}(?:\s*(?:,|&|and|-)\s*\d{1,2})*)\b.*?"
+                                 r"(?:(\d{1,3})\s+)?(\d{1,3})\s*\*?$", line, re.IGNORECASE)
+                    if m:
+                        chapters = [int(x) for x in re.findall(r"\d{1,2}", m.group(1))]
+                        hours = float(m.group(2)) if m.group(2) else None
+                        marks = float(m.group(3))
+                        for ch in chapters:
+                            marks_table[ch] = (hours, marks / len(chapters))
+                continue
 
-                item = _list_item(line)
-                if item is not None and objectives_target is not None:
-                    self._add_objective(result, objectives_target, item[1])
-                    continue
-                if item is not None and stack:
-                    label, text = item
-                    parent = stack[-1]
-                    # A list item after an item of the same style is a sibling, otherwise a child.
-                    same_style = parent.number and _label_style(parent.number) == _label_style(label)
-                    depth = parent.depth if same_style else parent.depth + 1
-                    attach(self._make_node(text, depth, label, ref))
-                    continue
+            obj_m = RE_OBJECTIVES.match(line)
+            if obj_m:
+                objectives_target = stack[0] if stack else "course"
+                if obj_m.group(1).strip():
+                    self._add_objective(result, objectives_target, obj_m.group(1).strip())
+                continue
 
-                if pending_title_for is not None:
-                    title, hours = self._extract_hours(line)
-                    pending_title_for.title = title or pending_title_for.title
-                    pending_title_for.hours = pending_title_for.hours or hours
-                    pending_title_for.kinds = sorted(set(pending_title_for.kinds) | set(_detect_kinds(line)))
-                    pending_title_for.source_refs.append(ref)
-                    pending_title_for = None
-                    continue
+            style = heading_texts.get(line.lower(), "")
+            if style.lower() in ("heading 1", "title") and not RE_NUMBERED.match(line):
+                stack.clear()
+                attach(self._make_node(line, 1, "", ref))
+                in_unit_scheme = True
+                objectives_target = None
+                continue
 
-                if stack:
-                    node = stack[-1]
-                    text, hours = self._extract_hours(line)
-                    if hours is not None and node.hours is None:
-                        node.hours = hours
-                    if text:
-                        node.description.append(text)
-                        if self.split_inline:
-                            for c in split_concepts(text, self.max_concept_words):
-                                if c not in node.concepts and len(c.split()) <= self.max_concept_words:
-                                    node.concepts.append(c)
-                        node.kinds = sorted(set(node.kinds) | set(_detect_kinds(text)))
-                    continue
+            num_m = RE_NUMBERED.match(line)
+            if num_m and not RE_HOURS.fullmatch(num_m.group(2).strip()):
+                number = num_m.group(1)
+                parts = number.split(".")
+                if in_unit_scheme:
+                    if len(parts) > 1 and current_unit_no is not None and int(parts[0]) == current_unit_no:
+                        depth = len(parts)
+                    else:
+                        depth = len(parts) + 1
+                else:
+                    depth = len(parts)
+                if lab_root is not None and stack and stack[0] is lab_root:
+                    depth = max(depth, 2)
+                node = self._make_node(num_m.group(2), depth, number, ref)
+                attach(node)
+                if not in_unit_scheme and len(parts) == 1:
+                    current_unit_no = int(parts[0])
+                pending_title_for = None
+                objectives_target = None
+                continue
 
-                # Text before any structure: course title / code.
-                if not result.course_title and len(line.split()) <= 14:
-                    result.course_title = line
-                m = re.search(r"\b([A-Z]{2,6}\s*-?\s*\d{3,4}[A-Z]?)\b", line)
-                if m and not result.course_code:
-                    result.course_code = m.group(1).replace(" ", "")
+            item = _list_item(line)
+            if item is not None and objectives_target is not None:
+                self._add_objective(result, objectives_target, item[1])
+                continue
+            if item is not None and stack:
+                label, text = item
+                parent = stack[-1]
+                # A list item after an item of the same style is a sibling, otherwise a child.
+                same_style = parent.number and _label_style(parent.number) == _label_style(label)
+                depth = parent.depth if same_style else parent.depth + 1
+                attach(self._make_node(text, depth, label, ref))
+                continue
+
+            if pending_title_for is not None:
+                title, hours = self._extract_hours(line)
+                pending_title_for.title = title or pending_title_for.title
+                pending_title_for.hours = pending_title_for.hours or hours
+                pending_title_for.kinds = sorted(set(pending_title_for.kinds) | set(_detect_kinds(line)))
+                pending_title_for.source_refs.append(ref)
+                pending_title_for = None
+                continue
+
+            if stack:
+                node = stack[-1]
+                text, hours = self._extract_hours(line)
+                if hours is not None and node.hours is None:
+                    node.hours = hours
+                if text:
+                    node.description.append(text)
+                    if self.split_inline:
+                        for c in split_concepts(text, self.max_concept_words):
+                            if c not in node.concepts and len(c.split()) <= self.max_concept_words:
+                                node.concepts.append(c)
+                    node.kinds = sorted(set(node.kinds) | set(_detect_kinds(text)))
+                continue
+
+            # Text before any structure: course title / code.
+            if not result.course_title and len(line.split()) <= 14:
+                result.course_title = line
+            m = re.search(r"\b([A-Z]{2,6}\s*-?\s*\d{3,4}[A-Z]?)\b", line)
+            if m and not result.course_code:
+                result.course_code = m.group(1).replace(" ", "")
 
         for root in result.roots:
             no = _roman_or_int(root.number) if root.number else None

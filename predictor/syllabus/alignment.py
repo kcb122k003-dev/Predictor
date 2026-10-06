@@ -191,7 +191,7 @@ class SyllabusAligner:
             results = [self._align_one(q, qvecs[i] @ self.node_vecs.T) for i, q in enumerate(questions)]
             for r in results:
                 for m in r.matches[:1]:
-                    if m.topic_id in self.feedback:
+                    if m.topic_id in self.feedback and r.status in ("A", "B"):
                         r.reason += (f" Topic vocabulary includes terms from {len(self.feedback[m.topic_id])} "
                                      f"confidently mapped question(s).")
         return results

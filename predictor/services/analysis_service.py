@@ -1,0 +1,717 @@
+"""The "Analyze & Predict" pipeline: from stored papers and syllabus to persisted predictions.
+
+Order of work:
+ 1. load the current syllabus tree and the included exams (time order)
+ 2. align every leaf question to the syllabus (manual mappings are kept)
+ 3. classify question types (manual types are kept)
+ 4. detect question recurrence (exact, paraphrase, concept)
+ 5. build the topic, concept and unfiltered panels
+ 6. backtest every candidate model, select, calibrate, audit leakage
+ 7. ablation and syllabus-filter check
+ 8. format forecast, recurring question families, grounded formulations
+ 9. structure discovery, coverage, co-occurrence, charts, paper simulation
+10. persist everything with the run
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import time
+import traceback
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Callable
+
+import numpy as np
+from sqlalchemy import delete, select
+
+from ..analysis.coverage import cooccurrence, topic_coverage, unit_coverage
+from ..analysis.structure import ExamSummary, LeafInfo, MainQuestion, discover_structure
+from ..database.models import (AnalysisArtifact, AnalysisRun, BacktestFold, Course, CourseTopic, Exam, ExamQuestion,
+                               ModelResult, PredictedQuestion, Prediction, QuestionTopicMapping, SyllabusVersion)
+from ..embeddings.backends import get_backend
+from ..embeddings.index import DbEmbeddingCache
+from ..evaluation.ablation import run_ablation, syllabus_filter_check
+from ..evaluation.backtest import BacktestEngine, BacktestReport
+from ..features.builder import GROUP_LABELS
+from ..generation.paper import simulate_papers
+from ..generation.questions import HistoricalQuestion, generate_formulations
+from ..parsing.question_types import QuestionTypeClassifier
+from ..prediction.families import backtest_families, predict_families
+from ..prediction.ranking import CATEGORY_ORDER, DISCLAIMER, build_topic_predictions
+from ..prediction.type_forecast import run_type_forecast
+from ..syllabus.alignment import (AlignmentResult, QuestionItem, SyllabusAligner, counts_for_prediction,
+                                  describe_status, match_confidence, thresholds_for)
+from ..syllabus.tree import TopicTree
+from ..temporal.dynamics import rotation_tests
+from ..temporal.panel import FORMATS, ExamInfo, Panel, QuestionRecord, build_panel
+from ..topic_modeling.families import FamilyQuestion, find_recurrence
+from ..utils.logging import get_logger, log_event
+from ..visualization.charts import build_charts
+from .context import AppContext
+from .syllabus_store import current_version, to_tree, topics_of
+
+log = get_logger("analysis")
+RANK_WEIGHTS = {1: 1.0, 2: 0.5, 3: 0.33}
+
+
+class AnalysisError(RuntimeError):
+    """A user-facing problem (missing data) rather than a bug."""
+
+
+@dataclass
+class Leaf:
+    id: int
+    exam_index: int
+    exam_id: int
+    text: str
+    context: str
+    marks: float | None
+    types: list[str]
+    type_user_edited: bool
+    options: list[Any]
+    path_label: str
+    manual: list[tuple[int, str]] = field(default_factory=list)  # (topic id, status)
+    format: str = "theory"
+    alignment: AlignmentResult | None = None
+    counted: list[tuple[int, float]] = field(default_factory=list)  # (mappable node id, weight)
+    status: str = "C"
+
+
+class AnalysisService:
+    def __init__(self, app: AppContext):
+        self.app = app
+
+    # ---------------------------------------------------------------- run API
+    def create_run(self, course_id: int) -> int:
+        with self.app.db.session() as s:
+            if s.get(Course, course_id) is None:
+                raise AnalysisError("Course not found.")
+            run = AnalysisRun(course_id=course_id, status="queued", progress=0.0, message="Queued")
+            s.add(run)
+            s.flush()
+            return run.id
+
+    def _progress(self, run_id: int, value: float, message: str) -> None:
+        with self.app.db.session() as s:
+            run = s.get(AnalysisRun, run_id)
+            run.progress = round(value, 3)
+            run.message = message
+            run.status = "running"
+        log_event(log, "analysis_progress", run_id=run_id, progress=round(value, 2), step=message)
+
+    def run(self, run_id: int) -> dict[str, Any]:
+        started = time.time()
+        try:
+            summary = self._run(run_id, started)
+            with self.app.db.session() as s:
+                run = s.get(AnalysisRun, run_id)
+                run.status = "done"
+                run.progress = 1.0
+                run.message = "Analysis complete"
+                run.finished_at = datetime.now(timezone.utc)
+                run.summary = summary
+            return summary
+        except AnalysisError as exc:
+            self._fail(run_id, str(exc), user_error=True)
+            raise
+        except Exception as exc:
+            log.exception("analysis failed", extra={"event": "analysis_failed", "run_id": run_id})
+            self._fail(run_id, f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=6)}", user_error=False)
+            raise
+
+    def _fail(self, run_id: int, message: str, user_error: bool) -> None:
+        with self.app.db.session() as s:
+            run = s.get(AnalysisRun, run_id)
+            if run is not None:
+                run.status = "error"
+                run.message = message[:4000]
+                run.finished_at = datetime.now(timezone.utc)
+                run.summary = {"error": message[:4000], "user_error": user_error}
+
+    # ----------------------------------------------------------------- loading
+    def _load(self, course_id: int):
+        with self.app.db.session() as s:
+            course = s.get(Course, course_id)
+            settings = self.app.course_settings(course)
+            version = current_version(s, course_id, create=False)
+            topics = topics_of(s, course_id, version.id) if version else []
+            if not topics:
+                raise AnalysisError("No syllabus topics yet. Upload the course contents (syllabus) first, or add "
+                                    "topics in the Syllabus tab.")
+            tree = to_tree(topics)
+            historical = []
+            for v in s.execute(select(SyllabusVersion).where(SyllabusVersion.course_id == course_id,
+                                                             SyllabusVersion.is_current.is_(False))).scalars():
+                vt = topics_of(s, course_id, v.id)
+                if vt:
+                    historical.append((v.label, to_tree(vt)))
+            exams = s.execute(select(Exam).where(Exam.course_id == course_id, Exam.include_in_analysis.is_(True))
+                              .order_by(Exam.order_index, Exam.id)).scalars().all()
+            if not exams:
+                raise AnalysisError("No past papers are included in the analysis. Upload papers and make sure each "
+                                    "has a year (Review tab).")
+            infos, leaves, exam_rows = [], [], []
+            for idx, e in enumerate(exams):
+                rows = s.execute(select(ExamQuestion).where(ExamQuestion.exam_id == e.id)
+                                 .order_by(ExamQuestion.order_no)).scalars().all()
+                main_marks = _main_marks(rows)
+                total = e.full_marks or main_marks or 100.0
+                label = (e.structure or {}).get("label") or (f"{e.year} {e.session}".strip() if e.year else f"Exam {e.id}")
+                infos.append(ExamInfo(e.id, e.order_index, label, float(total), e.year))
+                exam_rows.append((e, rows))
+                for q in rows:
+                    if not q.is_leaf:
+                        continue
+                    manual = [(m.topic_id, m.status) for m in q.mappings if m.method == "manual" and m.topic_id]
+                    leaves.append(Leaf(q.id, idx, e.id, q.text or "", q.context_text or q.text or "", q.marks,
+                                       list(q.question_types or []), q.type_user_edited, list(q.options or []),
+                                       q.path_label, manual))
+            snapshot = [(e.id, e.order_index, e.structure, e.full_marks, e.duration,
+                         [(q.id, q.parent_id, q.label, q.marks, q.or_group, q.is_optional, q.is_leaf, q.text, q.section_id)
+                          for q in rows]) for e, rows in exam_rows]
+        return settings, tree, historical, infos, leaves, snapshot
+
+    # ------------------------------------------------------------------- main
+    def _run(self, run_id: int, started: float) -> dict[str, Any]:
+        with self.app.db.session() as s:
+            course_id = s.get(AnalysisRun, run_id).course_id
+        self._progress(run_id, 0.03, "Loading syllabus and papers")
+        settings, tree, historical, infos, leaves, snapshot = self._load(course_id)
+        notes: list[str] = []
+        cache = DbEmbeddingCache(self.app.db.new_session)
+        backend, backend_note = get_backend(settings, cache)
+        if backend_note:
+            notes.append(backend_note)
+
+        # 2. Alignment ----------------------------------------------------------
+        self._progress(run_id, 0.1, "Mapping questions to the syllabus")
+        aligner = SyllabusAligner(settings, tree, backend)
+        results = aligner.align([QuestionItem(q.id, q.text, q.context) for q in leaves])
+        th = thresholds_for(settings, backend.kind)
+        for q, r in zip(leaves, results):
+            q.alignment = r
+            if q.manual:
+                q.status = q.manual[0][1]
+                q.counted = [(tid, RANK_WEIGHTS.get(i + 1, 0.33)) for i, (tid, st) in enumerate(q.manual)
+                             if counts_for_prediction(st, 1.0, "manual", settings, backend.kind) and tid in tree.nodes]
+            else:
+                q.status = r.status
+                q.counted = [(m.topic_id, RANK_WEIGHTS.get(m.rank, 0.33)) for m in r.matches
+                             if counts_for_prediction(m.status, m.score, "auto", settings, backend.kind)]
+        hist_matches = self._historical_matches(settings, historical, backend, leaves)
+        self._persist_mappings(leaves, hist_matches)
+
+        # 3. Types ------------------------------------------------------------
+        self._progress(run_id, 0.2, "Classifying question types")
+        classifier = QuestionTypeClassifier.load(self.app.data_dir)
+        type_updates = {}
+        for q in leaves:
+            if not q.type_user_edited:
+                tr = classifier.classify(q.text, marks=q.marks, options=q.options,
+                                         context=q.context if q.context != q.text else "")
+                q.types = tr.types
+                q.format = tr.format
+                type_updates[q.id] = (tr.types, {"scores": tr.scores, "format": tr.format,
+                                                 "confidence": tr.confidence, "evidence": tr.evidence})
+            else:
+                q.format = classifier.format_of(q.types[0]) if q.types else "theory"
+            if q.format not in FORMATS:
+                q.format = "theory"
+        self._persist_types(type_updates)
+
+        # 4. Recurrence ---------------------------------------------------------
+        self._progress(run_id, 0.27, "Finding repeated and paraphrased questions")
+        primary_node = {q.id: (q.counted[0][0] if q.counted else None) for q in leaves}
+        fam_qs = [FamilyQuestion(q.id, q.exam_index, q.text,
+                                 tree.topic_of(primary_node[q.id]) if primary_node[q.id] else None,
+                                 primary_node[q.id]) for q in leaves]
+        recurrence = find_recurrence(fam_qs, settings, backend if backend.kind == "neural" else None)
+
+        # 5. Panels ---------------------------------------------------------------
+        self._progress(run_id, 0.32, "Building the exam x topic panel")
+        topic_ids = tree.topic_ids()
+        unit_ids = tree.unit_ids()
+        concept_ids = tree.concept_ids()
+        topic_panel, cell_q = self._panel(tree, infos, leaves, recurrence, topic_ids, unit_ids, "topic", filtered=True)
+        concept_panel, _ = self._panel(tree, infos, leaves, recurrence, concept_ids, unit_ids, "concept", filtered=True)
+        unfiltered_panel, _ = self._panel(tree, infos, leaves, recurrence, topic_ids, unit_ids, "topic", filtered=False)
+
+        # 6. Backtest ---------------------------------------------------------------
+        self._progress(run_id, 0.38, "Backtesting candidate models on past exams")
+        engine = BacktestEngine(topic_panel, settings)
+        report = engine.run()
+        self._progress(run_id, 0.55, "Backtesting the concept layer")
+        concept_report = BacktestEngine(concept_panel, settings).run(audit_leakage=False)
+        unf_report = BacktestEngine(unfiltered_panel, settings).run(audit_leakage=False)
+
+        # 7. Ablation -----------------------------------------------------------------
+        self._progress(run_id, 0.65, "Running the ablation study")
+        lr = report.models.get("logistic")
+        ablation = run_ablation(topic_panel, settings, engine.store, report.targets, report.k, report.primary,
+                                bool(lr and lr.enabled), lr.gate_reason if lr else "logistic model not configured")
+        filter_check = syllabus_filter_check(report.predictions.get(report.selected, {}),
+                                             unf_report.predictions.get(report.selected, {}), topic_panel,
+                                             unfiltered_panel, report.targets, report.k, report.primary,
+                                             report.models[report.selected].display)
+
+        # 8. Layer 2 ---------------------------------------------------------------------
+        self._progress(run_id, 0.72, "Forecasting question formats and recurring questions")
+        col_of_topic = {tid: i for i, tid in enumerate(topic_ids)}
+        fine_types: dict[int, Counter] = defaultdict(Counter)
+        for q in leaves:
+            for nid, _ in q.counted[:1]:
+                fine_types[tree.topic_of(nid)].update(q.types[:1])
+        type_report = run_type_forecast(topic_panel, settings, report.targets, {k: dict(v) for k, v in fine_types.items()})
+        q_exam = {q.id: q.exam_index for q in leaves}
+        q_topic = {q.id: col_of_topic.get(tree.topic_of(primary_node[q.id])) if primary_node[q.id] else None
+                   for q in leaves}
+        half_life = float(settings.temporal.default_half_life)
+        fam_k = max(5, report.k)
+        families_bt = backtest_families(recurrence, q_exam, q_topic, report.predictions[report.selected],
+                                        report.targets, fam_k, half_life)
+        family_preds = predict_families(recurrence, q_exam, q_topic, report.final_scores, topic_panel.T, half_life)
+
+        # 9. Explanations -----------------------------------------------------------------
+        self._progress(run_id, 0.8, "Explaining predictions")
+        fm_final = engine.store.at(topic_panel.T)
+        explain_output = report.final_outputs.get("logistic") if lr and lr.enabled else None
+        mapping_conf = np.zeros(len(topic_ids))
+        conf_lists: dict[int, list[float]] = defaultdict(list)
+        for q in leaves:
+            if q.alignment is None:
+                continue
+            for nid, _ in q.counted[:1]:
+                col = col_of_topic.get(tree.topic_of(nid))
+                match = next((m for m in q.alignment.matches if m.topic_id == nid), None)
+                if col is not None:
+                    conf_lists[col].append(1.0 if q.manual else (match.confidence if match else 0.5))
+        for col, vals in conf_lists.items():
+            mapping_conf[col] = float(np.mean(vals))
+        rotation = {}
+        for r in rotation_tests(topic_panel.Y, min_gaps=int(settings.temporal.rotation_min_gaps),
+                                alpha=float(settings.temporal.rotation_p_value),
+                                permutations=int(settings.temporal.rotation_permutations),
+                                seed=int(settings.models.random_seed)):
+            rotation[r.item] = {"gaps": r.gaps, "cv": r.cv, "p_value": r.p_value, "period": r.period,
+                                "significant": r.significant}
+        locations = {tid: _location(tree, tid) for tid in topic_ids}
+        preds = build_topic_predictions(topic_panel, report, fm_final, settings, explain_output=explain_output,
+                                        mapping_confidence=mapping_conf, rotation=rotation,
+                                        type_forecast=type_report.per_topic, syllabus_location=locations,
+                                        lab_items={t for t in topic_ids if _is_lab(tree, t)})
+
+        # Formulations for the topics worth revising first.
+        history_by_topic: dict[int, list[HistoricalQuestion]] = defaultdict(list)
+        course_hist: list[HistoricalQuestion] = []
+        for q in leaves:
+            hq = HistoricalQuestion(q.id, q.text, q.format, q.types, q.marks, infos[q.exam_index].label, q.exam_index,
+                                    recurrence.family_of.get(q.id))
+            if q.status in ("A", "B") or q.manual:
+                course_hist.append(hq)
+            for nid, _ in q.counted[:1]:
+                history_by_topic[tree.topic_of(nid)].append(hq)
+        formulations: dict[int, list[dict[str, Any]]] = {}
+        wanted = [p for p in preds if p.category in CATEGORY_ORDER[:3]][:30] or preds[:10]
+        for p in wanted:
+            dist = type_report.per_topic.get(p.item_id, {}).get("distribution")
+            forms = generate_formulations(tree, p.item_id, history_by_topic.get(p.item_id, []), course_hist, dist, settings)
+            formulations[p.item_id] = [f.as_dict() for f in forms]
+
+        # 10. Structure, coverage, charts, papers -------------------------------------------
+        self._progress(run_id, 0.88, "Analysing paper structure and coverage")
+        summaries = self._exam_summaries(snapshot, infos, leaves, tree, col_of_topic, unit_ids)
+        structure = discover_structure(summaries)
+        unit_labels = [tree.nodes[u].label() for u in unit_ids]
+        coverage = {"units": unit_coverage(topic_panel, unit_labels), "topics": topic_coverage(topic_panel),
+                    "cooccurrence": cooccurrence(topic_panel)}
+        leaf_marks = [q.marks for q in leaves if q.marks]
+        charts = build_charts(topic_panel, cell_q, unit_labels, report, leaf_marks, settings)
+        unit_share = coverage["units"].get("marks_share") if coverage["units"].get("available") else None
+        max_unit_share = float(np.max(unit_share)) if unit_share is not None and np.size(unit_share) else 0.35
+        papers = simulate_papers(
+            topic_ids=topic_ids, topic_labels=topic_panel.item_labels, scores=_paper_scores(preds, len(topic_ids)),
+            units=topic_panel.item_unit, unit_labels=unit_labels, typical=structure.typical, formulations=formulations,
+            type_forecast=type_report.per_topic, max_unit_share=max_unit_share,
+            variants=int(settings.generation.paper_variants), seed=int(settings.generation.paper_seed))
+        excluded = self._excluded_groups(leaves, recurrence, infos, tree)
+
+        # 11. Persist ------------------------------------------------------------------------
+        self._progress(run_id, 0.95, "Saving results")
+        sufficiency = _sufficiency(report, topic_panel)
+        summary = {
+            "exams": topic_panel.T, "questions": len(leaves), "topics": len(topic_ids), "concepts": len(concept_ids),
+            "units": len(unit_ids), "k": report.k, "primary_metric": report.primary,
+            "selected_model": report.selected, "selected_display": report.models[report.selected].display,
+            "selection_reason": report.selection_reason, "best_by_mean": report.best_by_mean,
+            "calibrated": bool(report.calibration and report.calibration.valid),
+            "calibration_reason": report.calibration.reason if report.calibration else
+            "No backtest folds: probabilities cannot be calibrated.",
+            "notes": report.notes + notes, "embedding_backend": backend.name, "disclaimer": DISCLAIMER,
+            "status_counts": dict(Counter(q.status for q in leaves)),
+            "counted_questions": sum(1 for q in leaves if q.counted),
+            "leakage_audit": report.leakage_audit, "sufficiency": sufficiency,
+            "concept_layer": _layer_summary(concept_report),
+            "type_forecast": {"method": type_report.method, "reason": type_report.reason},
+            "families": families_bt, "seconds": round(time.time() - started, 2),
+            "fingerprint": _fingerprint(leaves, topic_ids, settings),
+            "settings_used": {"strictness": float(settings.alignment.strictness), "top_k": str(settings.models.top_k),
+                              "selection_rule": str(settings.models.selection_rule),
+                              "alignment_thresholds": th},
+        }
+        self._persist_results(run_id, settings, report, concept_report, preds, formulations, family_preds,
+                              concept_panel, tree, recurrence, infos, {
+                                  "charts": charts,
+                                  "structure": {"per_exam": structure.per_exam, "patterns": structure.patterns,
+                                                "hypotheses": structure.hypotheses, "typical": structure.typical},
+                                  "coverage": coverage, "ablation": ablation, "syllabus_filter": filter_check,
+                                  "calibration": report.calibration.as_dict() if report.calibration else {"valid": False},
+                                  "type_forecast": {"method": type_report.method, "reason": type_report.reason,
+                                                    "accuracy": type_report.accuracy, "gated": type_report.gated},
+                                  "families": {"backtest": families_bt, "predictions": family_preds},
+                                  "papers": {"papers": papers, "structure_hypotheses": structure.hypotheses},
+                                  "excluded": {"groups": excluded},
+                                  "rotation": {"items": [{"label": topic_panel.item_labels[k], **v}
+                                                         for k, v in rotation.items()]},
+                                  "sufficiency": sufficiency,
+                                  "models": {"table": report.summary_table(), "selected": report.selected,
+                                             "reason": report.selection_reason, "k": report.k,
+                                             "primary": report.primary, "targets": [infos[t].label for t in report.targets],
+                                             "leakage_audit": report.leakage_audit,
+                                             "concept_table": concept_report.summary_table()},
+                              })
+        log_event(log, "analysis_done", run_id=run_id, seconds=summary["seconds"], selected=report.selected)
+        return summary
+
+    # ------------------------------------------------------------- helpers
+    def _historical_matches(self, settings, historical, backend, leaves) -> dict[int, dict[str, Any]]:
+        out: dict[int, dict[str, Any]] = {}
+        weak = [q for q in leaves if q.status in ("C", "D") and not q.manual]
+        if not weak or not historical:
+            return out
+        for label, htree in historical:
+            from ..embeddings.backends import TfidfBackend
+
+            hb = backend if backend.kind == "neural" else TfidfBackend(settings)
+            res = SyllabusAligner(settings, htree, hb).align([QuestionItem(q.id, q.text, q.context) for q in weak],
+                                                              feedback=False)
+            for q, r in zip(weak, res):
+                if r.status in ("A", "B") and r.matches and q.id not in out:
+                    out[q.id] = {"version": label, "topic": htree.nodes[r.matches[0].topic_id].title,
+                                 "score": r.matches[0].score}
+        return out
+
+    def _persist_mappings(self, leaves: list[Leaf], hist_matches: dict[int, dict[str, Any]]) -> None:
+        with self.app.db.session() as s:
+            ids = [q.id for q in leaves if not q.manual]
+            for start in range(0, len(ids), 500):
+                s.execute(delete(QuestionTopicMapping).where(QuestionTopicMapping.question_id.in_(ids[start:start + 500]),
+                                                             QuestionTopicMapping.method == "auto"))
+            for q in leaves:
+                if q.manual or q.alignment is None:
+                    continue
+                r = q.alignment
+                evidence = {"reason": r.reason, "unknown_terms": r.unknown_terms, "status_label": describe_status(r.status)}
+                if q.id in hist_matches:
+                    evidence["historical_syllabus"] = hist_matches[q.id]
+                    evidence["reason"] += (f" It matches the '{hist_matches[q.id]['version']}' syllabus topic "
+                                           f"'{hist_matches[q.id]['topic']}', which is not in the current syllabus.")
+                if not r.matches:
+                    s.add(QuestionTopicMapping(question_id=q.id, topic_id=None, rank=1, confidence=0.0, status=r.status,
+                                               evidence_text="", evidence=evidence, method="auto",
+                                               unknown_term_ratio=r.unknown_ratio))
+                    continue
+                for m in r.matches:
+                    s.add(QuestionTopicMapping(
+                        question_id=q.id, topic_id=m.topic_id, rank=m.rank, confidence=m.confidence,
+                        status=m.status if m.rank > 1 else r.status, semantic_similarity=m.semantic,
+                        keyword_overlap=m.keyword, unknown_term_ratio=r.unknown_ratio, matched_terms=m.matched_terms,
+                        evidence_text=m.evidence_text, evidence={**evidence, "score": m.score}, method="auto"))
+
+    def _persist_types(self, updates: dict[int, tuple[list[str], dict[str, Any]]]) -> None:
+        if not updates:
+            return
+        with self.app.db.session() as s:
+            for qid, (types, scores) in updates.items():
+                row = s.get(ExamQuestion, qid)
+                if row is not None and not row.type_user_edited:
+                    row.question_types = types
+                    row.type_scores = scores
+
+    def _panel(self, tree: TopicTree, infos: list[ExamInfo], leaves: list[Leaf], recurrence, item_ids: list[int],
+               unit_ids: list[int], layer: str, filtered: bool) -> tuple[Panel, dict[tuple[int, int], list[int]]]:
+        col = {nid: i for i, nid in enumerate(item_ids)}
+        unit_col = {u: i for i, u in enumerate(unit_ids)}
+
+        def to_col(nid: int) -> int | None:
+            if layer == "topic":
+                return col.get(tree.topic_of(nid))
+            if layer == "concept":
+                if nid in col:
+                    return col[nid]
+                # A question mapped to a non-leaf node counts for its first concept-level descendant set? No:
+                # only exact concept matches count, the node itself is not a concept.
+                return None
+            return col.get(tree.unit_of(nid))
+
+        records, cells = [], defaultdict(list)
+        for q in leaves:
+            if filtered:
+                mapped = q.counted
+            else:
+                mapped = q.counted or ([(q.alignment.matches[0].topic_id, 1.0)] if q.alignment and q.alignment.matches else [])
+            items: dict[int, float] = {}
+            for nid, w in mapped:
+                c = to_col(nid)
+                if c is not None:
+                    items[c] = max(items.get(c, 0.0), w)
+            soft: dict[int, float] = {}
+            if q.alignment is not None and q.status != "D":
+                for m in q.alignment.matches:
+                    c = to_col(m.topic_id)
+                    if c is not None:
+                        soft[c] = max(soft.get(c, 0.0), m.score)
+            for c in items:
+                cells[(q.exam_index, c)].append(q.id)
+            records.append(QuestionRecord(q.id, q.exam_index, q.text, q.marks, q.format, q.types, list(items.items()),
+                                          status=q.status, soft=soft,
+                                          exact_repeat=bool(recurrence.exact_prev.get(q.id)),
+                                          para_repeat=bool(recurrence.para_prev.get(q.id))))
+        labels = [tree.nodes[i].label() for i in item_ids]
+        item_unit = np.array([unit_col.get(tree.unit_of(i), 0) for i in item_ids], dtype=int)
+        static = _static_features(tree, item_ids, unit_ids)
+        panel = build_panel(infos, item_ids, labels, records, static=static, item_unit=item_unit, unit_ids=unit_ids,
+                            layer=layer)
+        return panel, dict(cells)
+
+    def _exam_summaries(self, snapshot, infos, leaves, tree, col_of_topic, unit_ids) -> list[ExamSummary]:
+        leaf_by_id = {q.id: q for q in leaves}
+        unit_col = {u: i for i, u in enumerate(unit_ids)}
+        out = []
+        for (eid, order, structure, full_marks, duration, rows), info in zip(snapshot, infos):
+            children = Counter(r[1] for r in rows if r[1] is not None)
+            mains = []
+            for (qid, parent, label, marks, or_group, optional, is_leaf, text, section) in rows:
+                if parent is None:
+                    mains.append(MainQuestion(label, marks, children.get(qid, 0), or_group, optional, section,
+                                              "short note" in (text or "").lower()))
+            leaf_infos = []
+            for r in rows:
+                q = leaf_by_id.get(r[0])
+                if q is None:
+                    continue
+                nid = q.counted[0][0] if q.counted else None
+                leaf_infos.append(LeafInfo(q.format, q.marks, col_of_topic.get(tree.topic_of(nid)) if nid else None,
+                                           unit_col.get(tree.unit_of(nid)) if nid else None))
+            sections = len({r[8] for r in rows if r[8] is not None})
+            out.append(ExamSummary(info.label, order, full_marks, mains, leaf_infos, sections,
+                                   (structure or {}).get("attempt_count"), duration or ""))
+        return out
+
+    def _excluded_groups(self, leaves: list[Leaf], recurrence, infos, tree) -> list[dict[str, Any]]:
+        groups: dict[str, list[Leaf]] = defaultdict(list)
+        for q in leaves:
+            if q.status == "D" and not q.manual:
+                groups[recurrence.family_of.get(q.id, f"q{q.id}")].append(q)
+        out = []
+        for key, qs in groups.items():
+            first = qs[0]
+            r = first.alignment
+            nearest = tree.nodes[r.matches[0].topic_id].title if r and r.matches else None
+            reason = r.reason if r else "Outside the current syllabus."
+            if r and r.unknown_terms:
+                reason += f" Terms not in the syllabus: {', '.join(r.unknown_terms[:6])}."
+            out.append({"label": first.text[:160], "reason": reason, "nearest_topic": nearest,
+                        "questions": [q.id for q in qs], "years": sorted({infos[q.exam_index].label for q in qs}),
+                        "category": CATEGORY_ORDER[4]})
+        out.sort(key=lambda g: -len(g["questions"]))
+        return out
+
+    def _persist_results(self, run_id, settings, report: BacktestReport, concept_report: BacktestReport, preds,
+                         formulations, family_preds, concept_panel: Panel, tree, recurrence, infos,
+                         artifacts: dict[str, Any]) -> None:
+        with self.app.db.session() as s:
+            for layer, rep in (("topic", report), ("concept", concept_report)):
+                for name, mr in rep.models.items():
+                    if mr.hidden:
+                        continue
+                    s.add(ModelResult(run_id=run_id, layer=layer, model_name=name, display_name=mr.display,
+                                      family=mr.family, complexity=mr.complexity, enabled=mr.enabled,
+                                      gate_reason=mr.gate_reason, selected=name == rep.selected,
+                                      metrics=_clean(mr.mean), metric_se=_clean(mr.se), notes=" ".join(mr.notes)))
+                    if layer == "topic":
+                        for t, fm in mr.fold_metrics.items():
+                            s.add(BacktestFold(run_id=run_id, layer=layer, model_name=name,
+                                               target_exam_id=infos[t].exam_id, target_index=t,
+                                               target_label=infos[t].label, n_train_exams=t, metrics=_clean(fm)))
+            for p in preds:
+                s.add(Prediction(
+                    run_id=run_id, layer="topic", topic_id=p.item_id, item_key=str(p.item_id), label=p.label,
+                    rank=p.rank, score=p.score, probability=p.probability, prob_low=p.prob_low, prob_high=p.prob_high,
+                    calibrated=p.calibrated, category=p.category, confidence=p.confidence,
+                    features={"facts": _jsonable(p.facts), "signals_for": p.signals_for,
+                              "relative_score": p.relative_score},
+                    contributions={"values": p.contributions, "source": p.contribution_source},
+                    evidence={"lines": p.evidence}, why_not=p.why_not))
+                for f in formulations.get(p.item_id, []):
+                    s.add(PredictedQuestion(run_id=run_id, topic_id=p.item_id, text=f["text"],
+                                            question_type=f["format"], marks_low=f["marks_low"],
+                                            marks_high=f["marks_high"], basis=f["basis"], rank=f["rank"],
+                                            evidence_question_ids=f["evidence_question_ids"],
+                                            grounding={**f["grounding"], "note": f["note"], "label": f["label"]}))
+            scores = concept_report.final_scores
+            order = np.lexsort((np.arange(len(scores)), -scores))
+            for rank, i in enumerate(order, start=1):
+                nid = concept_panel.item_ids[i]
+                s.add(Prediction(run_id=run_id, layer="concept", topic_id=nid, item_key=str(nid),
+                                 label=tree.path_label(nid), rank=rank, score=round(float(scores[i]), 5),
+                                 category="", confidence="",
+                                 features={"appearances": int(concept_panel.Y[:, i].sum())}))
+            for rank, fam in enumerate(family_preds, start=1):
+                tid = report_topic_id(fam, preds)
+                s.add(Prediction(run_id=run_id, layer="family", topic_id=tid, item_key=fam["family"],
+                                 label=f"{len(fam['question_ids'])} question(s) in {fam['appearances']} exam(s)",
+                                 rank=rank, score=fam["score"], category="", confidence="",
+                                 features={"question_ids": fam["question_ids"],
+                                           "exams": [infos[e].label for e in fam["exam_indices"]]}))
+            for key, data in artifacts.items():
+                s.add(AnalysisArtifact(run_id=run_id, key=key, data=_jsonable(data)))
+
+
+# ---------------------------------------------------------------------- utilities
+def report_topic_id(fam: dict[str, Any], preds) -> int | None:
+    col = fam.get("topic_col")
+    for p in preds:
+        if p.item_index == col:
+            return p.item_id
+    return None
+
+
+def _paper_scores(preds, n: int) -> np.ndarray:
+    out = np.zeros(n)
+    for p in preds:
+        out[p.item_index] = p.probability if p.probability is not None else max(p.relative_score, 0.01) ** 2
+    return out
+
+
+def _main_marks(rows: list[ExamQuestion]) -> float | None:
+    mains = [r for r in rows if r.parent_id is None]
+    seen, total = set(), 0.0
+    for m in mains:
+        if m.marks is None:
+            continue
+        if m.or_group:
+            if m.or_group in seen:
+                continue
+            seen.add(m.or_group)
+        total += m.marks
+    return total or None
+
+
+def _static_features(tree: TopicTree, item_ids: list[int], unit_ids: list[int]) -> dict[str, np.ndarray]:
+    K = len(item_ids)
+    hours = np.full(K, np.nan)
+    marks_w = np.full(K, np.nan)
+    breadth = np.zeros(K)
+    siblings: dict[int, int] = Counter(tree.unit_of(i) for i in item_ids)
+    for k, nid in enumerate(item_ids):
+        node = tree.nodes[nid]
+        if node.hours is not None:
+            hours[k] = node.hours
+        else:
+            unit = tree.nodes[tree.unit_of(nid)]
+            if unit.hours is not None:
+                hours[k] = unit.hours / max(siblings[unit.id], 1)
+        unit = tree.nodes[tree.unit_of(nid)]
+        mw = node.marks_weight if node.marks_weight is not None else unit.marks_weight
+        if mw is not None:
+            marks_w[k] = mw / (1 if node.marks_weight is not None else max(siblings[unit.id], 1))
+        breadth[k] = math.log1p(len(tree.descendants(nid)) + len(node.concepts))
+    out = {"breadth": breadth}
+    for name, arr in (("hours_share", hours), ("marks_weight_share", marks_w)):
+        if np.isfinite(arr).sum() >= max(1, K // 2):
+            filled = np.where(np.isfinite(arr), arr, np.nanmean(arr))
+            out[name] = filled / filled.sum() * K / 10.0
+        else:
+            out[name] = np.zeros(K)
+    return out
+
+
+def _is_lab(tree: TopicTree, nid: int) -> bool:
+    return any("lab" in tree.nodes[i].kinds for i in [nid, *tree.ancestors(nid)])
+
+
+def _location(tree: TopicTree, nid: int) -> str:
+    path = tree.path_label(nid)
+    refs = tree.nodes[nid].source_refs
+    if refs:
+        r = refs[0]
+        return f"{path} ({r.get('file')}, page {r.get('page')})"
+    return path
+
+
+def _sufficiency(report: BacktestReport, panel: Panel) -> dict[str, Any]:
+    rows = []
+    for mr in report.models.values():
+        if mr.hidden:
+            continue
+        rows.append({"model": mr.display, "enabled": mr.enabled, "reason": mr.gate_reason or "Enabled."})
+    mode = "advanced" if any(r["enabled"] for r in rows if r["model"] in ("Logistic regression",)) else "statistical"
+    msg = None
+    if mode == "statistical":
+        msg = ("Advanced ML disabled because the historical sample is too small for reliable training. "
+               "The ranking uses transparent statistical models.")
+    return {"exams": panel.T, "folds": len(report.targets), "mode": mode, "message": msg, "models": rows,
+            "notes": report.notes}
+
+
+def _layer_summary(rep: BacktestReport) -> dict[str, Any]:
+    sel = rep.models.get(rep.selected)
+    return {"selected": rep.selected, "k": rep.k,
+            "recall": _clean({"v": sel.mean.get("recall") if sel else None})["v"],
+            "ndcg": _clean({"v": sel.mean.get("ndcg") if sel else None})["v"],
+            "random_recall": _clean({"v": rep.models["random"].mean.get("recall") if "random" in rep.models
+                                     and rep.models["random"].mean else None})["v"]}
+
+
+def _clean(d: dict[str, Any]) -> dict[str, Any]:
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+            out[k] = None
+        elif isinstance(v, (np.floating, np.integer)):
+            out[k] = v.item()
+        else:
+            out[k] = v
+    return out
+
+
+def _jsonable(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        return {str(k): _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_jsonable(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return _jsonable(obj.tolist())
+    if isinstance(obj, (np.floating,)):
+        v = float(obj)
+        return None if math.isnan(v) or math.isinf(v) else v
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.bool_,)):
+        return bool(obj)
+    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+        return None
+    return obj
+
+
+def _fingerprint(leaves: list[Leaf], topic_ids: list[int], settings) -> str:
+    h = hashlib.sha256()
+    for q in leaves:
+        h.update(f"{q.id}|{q.exam_index}|{q.text}|{q.marks}|{q.manual}".encode("utf-8"))
+    h.update(json.dumps(topic_ids).encode())
+    h.update(json.dumps(settings.as_dict(), sort_keys=True, default=str).encode())
+    return h.hexdigest()[:16]
