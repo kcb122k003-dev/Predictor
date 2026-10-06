@@ -1,0 +1,213 @@
+# Default settings for Exam Predictor.
+#
+# This file is the single source of default values. Your own changes are stored in
+# <data_dir>/settings.json (edited through the Settings page) and per-course overrides
+# are stored with each course. Values here are never edited at runtime.
+
+[app]
+# Empty means: $PREDICTOR_DATA_DIR if set, otherwise ~/ExamPredictorData
+data_dir = ""
+host = "127.0.0.1"
+port = 8765
+open_browser = true
+# External services (cloud OCR, remote models) are off and nothing in the app uses
+# the network. Downloading an embedding model is a separate, explicit CLI command.
+allow_external_services = false
+
+[logging]
+level = "INFO"
+json_file = true
+max_bytes = 5_000_000
+backups = 3
+
+[ingestion]
+max_file_mb = 200
+supported_extensions = [".pdf", ".docx", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp", ".txt", ".md"]
+# A PDF page with fewer extracted characters than this is treated as scanned and OCRed.
+native_text_min_chars = 40
+# A PDF page whose native text is mostly garbage symbols is OCRed instead.
+native_garbage_max_ratio = 0.30
+
+[ocr]
+enabled = true
+# Empty means: find "tesseract" on PATH (or the usual Windows install folder).
+tesseract_cmd = ""
+language = "eng"
+dpi = 300
+# Tesseract page segmentation mode. 4 = single column of text of variable sizes,
+# which keeps question lines intact on most papers. 3 = fully automatic.
+psm = 4
+oem = 1
+deskew = true
+denoise = true
+contrast_normalize = true
+detect_rotation = true
+# adaptive | otsu | none
+binarize = "adaptive"
+# Images smaller than this (longest side, pixels) are upscaled before OCR.
+min_long_side_px = 1800
+# Mean word confidence (0-100) below which a page is flagged for review.
+low_confidence = 65.0
+# Words below this confidence count as "low-confidence words".
+low_word_confidence = 50.0
+
+[quality]
+# Fraction of non-alphanumeric, non-math characters above which text looks broken.
+suspicious_symbol_ratio = 0.25
+# Fraction of implausible tokens (random consonant runs, mixed digits/letters) above
+# which text looks like OCR noise.
+suspicious_token_ratio = 0.30
+min_question_words = 3
+max_question_words = 170
+
+[parsing]
+# Treat a bare number at the far right of a line as marks (common in scanned papers).
+detect_margin_marks = true
+# Sub-items with at most this many words under a "choose/which" stem are MCQ options.
+mcq_max_option_words = 10
+# Main question numbers above this are treated as text, not numbering.
+max_question_number = 40
+# Years accepted as exam years (Gregorian and Bikram Sambat ranges).
+min_year = 1950
+max_year = 2100
+
+[syllabus]
+# Headings that start non-topic sections (their content never becomes a topic).
+stop_headings = ["reference", "references", "text book", "textbook", "text books", "reference books", "bibliography", "suggested readings", "recommended books", "evaluation", "evaluation scheme", "marks distribution", "assessment", "prerequisite", "prerequisites", "course objectives", "objectives", "learning outcomes", "course outcomes", "teaching methods", "practical", "tutorials"]
+# Inline lists inside a topic line ("a, b and c") are split into concept phrases.
+split_inline_concepts = true
+max_concept_words = 9
+# Fuzzy title ratio (0-100) for merging the same topic across documents.
+merge_title_ratio = 86
+
+[embeddings]
+# auto | tfidf | sentence-transformers
+# "auto" uses sentence-transformers only if the model is already on disk; otherwise TF-IDF.
+backend = "auto"
+model_name = "BAAI/bge-small-en-v1.5"
+# Empty means <data_dir>/models
+model_dir = ""
+batch_size = 32
+tfidf_word_ngram_max = 2
+tfidf_char_ngram_min = 3
+tfidf_char_ngram_max = 5
+tfidf_word_weight = 0.65
+tfidf_char_weight = 0.35
+
+[alignment]
+semantic_weight = 0.6
+keyword_weight = 0.4
+# A second topic is also assigned when its score is at least this fraction of the best.
+multi_topic_ratio = 0.88
+max_topics_per_question = 2
+# 0 = lenient (A, B and C influence predictions), 0.5 = A and validated B,
+# 1 = strict (only A). See docs/USER_GUIDE.md.
+strictness = 0.5
+# Words that describe what to do, not what the topic is. Ignored for keyword evidence.
+instruction_words = ["derive", "derivation", "explain", "define", "definition", "describe", "discuss", "calculate", "compute", "determine", "find", "obtain", "show", "prove", "state", "write", "short", "note", "notes", "brief", "briefly", "neat", "sketch", "diagram", "figure", "suitable", "example", "examples", "mark", "marks", "what", "how", "why", "when", "which", "give", "list", "differentiate", "distinguish", "compare", "comparison", "difference", "between", "mean", "meant", "illustrate", "elaborate", "evaluate", "estimate", "draw", "following", "also", "using", "use", "help", "necessary", "assume", "data", "value", "values", "term", "terms", "expression", "relation", "relationship", "significance", "importance", "important", "various", "type", "types", "applications", "application", "advantage", "advantages", "disadvantage", "disadvantages", "answer", "question", "questions", "attempt", "any", "all", "given", "figure", "fig", "case", "cases", "detail", "details", "clearly", "properly"]
+
+[alignment.thresholds.tfidf]
+clearly_in = 0.34
+probably_in = 0.22
+outside = 0.12
+
+[alignment.thresholds.neural]
+clearly_in = 0.62
+probably_in = 0.50
+outside = 0.38
+
+[alignment.evidence]
+# Share of a question's IDF-weighted content terms found in the matched topic for status A.
+min_keyword_coverage_clear = 0.30
+# Share of content terms absent from the whole syllabus above which a weak match is "outside".
+outside_unknown_term_ratio = 0.60
+
+[recurrence]
+# Exact repeat: embedding similarity AND token-set string ratio (0-100) both above.
+exact_similarity = 0.86
+exact_string_ratio = 86
+# Paraphrase: similarity above this and same syllabus topic.
+paraphrase_similarity = 0.55
+paraphrase_string_ratio = 60
+# Concept recurrence: same deepest syllabus node, or similarity above this.
+concept_similarity = 0.40
+
+[temporal]
+half_lives = [0.75, 1.5, 3.0, 6.0]
+default_half_life = 2.0
+windows = [1, 2, 3, 5]
+rotation_min_gaps = 3
+rotation_p_value = 0.10
+rotation_permutations = 2000
+# Pseudo-observations used to shrink a gap-specific hazard toward the pooled rate.
+hazard_prior_strength = 3.0
+# Pseudo-exams used to shrink a topic's rate toward the pooled rate.
+rate_prior_strength = 2.0
+
+[models]
+# Exams before the first backtest target.
+min_train_exams = 3
+# Exams before a training row is created for learned models.
+min_history = 2
+# ndcg | recall | precision | hit_rate | mrr
+primary_metric = "ndcg"
+# "auto" = median distinct topics per past exam, bounded by top_k_min/top_k_max.
+top_k = "auto"
+top_k_min = 3
+top_k_max = 15
+# one_se = simplest model within one standard error of the best; best = highest mean.
+selection_rule = "one_se"
+random_seed = 13
+logistic_C = 0.5
+ensemble_max_members = 3
+forest_trees = 300
+forest_min_leaf = 5
+gbm_max_iter = 150
+gbm_learning_rate = 0.05
+gbm_max_depth = 3
+hmm_iterations = 60
+enabled = ["random", "frequency", "last_exam", "window", "ewma", "linear_decay", "freq_recency", "beta_binomial", "markov", "hazard", "semantic", "logistic", "random_forest", "gradient_boosting", "hmm", "ensemble"]
+
+[models.sufficiency]
+min_exams_backtest = 4
+min_exams_logistic = 7
+min_positive_rows_logistic = 30
+min_exams_trees = 10
+min_rows_trees = 400
+min_exams_hmm = 12
+min_exams_hazard = 6
+min_exams_type_transition = 6
+# Below this many exams the report states that predictions are highly uncertain.
+low_confidence_exams = 6
+
+[calibration]
+min_rows = 80
+min_positives = 15
+bootstrap_samples = 200
+band_low = 0.10
+band_high = 0.90
+reliability_bins = 5
+
+[prediction]
+# Category thresholds on calibrated probability (used only when calibration is valid).
+very_high = 0.70
+high = 0.45
+moderate = 0.20
+# "Extremely high" also needs this many independent supporting signals.
+min_signals_very_high = 3
+# Without calibration, categories use rank relative to topics per exam (m):
+# top ceil(m * very_high_rank_share) -> very high, top m -> high, top 2m -> moderate.
+very_high_rank_share = 0.34
+why_not_count = 12
+
+[generation]
+formulations_per_topic = 3
+paper_variants = 3
+paper_seed = 7
+
+[search]
+semantic_top_k = 25
+min_semantic_score = 0.12
+
+[export]
+pdf_page_size = "A4"
