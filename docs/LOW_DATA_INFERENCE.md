@@ -223,19 +223,20 @@ Scored by the app against its own mapped labels (what a real course can measure)
 | Method | NDCG@11 |
 |---|---:|
 | General ranking model (cross-course) | 0.758 ± 0.028 |
-| **Evidence-aware ensemble (final)** | **0.753 ± 0.033** |
+| **Evidence-aware ensemble (final)** | **0.754 ± 0.033** |
 | Semantic evidence | 0.749 ± 0.024 |
 | Hierarchical Bayesian recurrence | 0.724 ± 0.025 |
 | Recent-window frequency (selected by the old engine) | 0.720 ± 0.020 |
 | Most frequent topics | 0.709 ± 0.029 |
 | Random selection | 0.460 |
 
-Ensemble vs frequency: +0.044 ± 0.022, better on 8 of 11 papers and worse on 2. 95% interval of the ensemble's
-mean: 0.679-0.827.
+Ensemble vs frequency: +0.046 ± 0.021, better on 9 of 11 papers and worse on 2. 95% interval of the ensemble's
+mean: 0.681-0.827. Course-learned models on this course: random forest 0.700, gradient boosting 0.686, course
+logistic 0.675 (each LIMITED, 2-3% weight).
 
 Scored against the generator's true topics, the measure the app cannot see for a real course, the picture is
-different. Ensemble 0.734 ± 0.028, frequency 0.745, window 0.738, general model 0.740: all within one standard
-error, so **the demo does not show an improvement over plain frequency.** Part of the gain against mapped labels
+different. Ensemble 0.732 ± 0.028, frequency 0.745, window 0.738, general model 0.740 (ensemble minus frequency
+-0.014 ± 0.017): all within one standard error, so **the demo does not show an improvement over plain frequency.** Part of the gain against mapped labels
 comes from the semantic component, which uses the same alignment scores that produce the labels. It cannot see
 the held-out paper, but it shares the alignment's systematic choices. We report both measurements rather than
 the favourable one.
@@ -250,12 +251,13 @@ Staged ablation on the demo (NDCG@11, paired change vs previous stage):
 | + semantic | 0.727 | -0.007 ± 0.012 | 0.91 | 0.649 | 0.649 | 0.440 |
 | + topic structure | 0.729 | +0.002 ± 0.010 | 0.91 | 0.666 | 0.666 | 0.440 |
 | + temporal dynamics | 0.731 | +0.003 ± 0.008 | 0.91 | 0.665 | 0.665 | 0.451 |
-| Full ensemble | 0.753 | +0.021 ± 0.016 | 0.91 | 0.696 | 0.696 | 0.470 |
+| Full ensemble | 0.754 | +0.023 ± 0.016 | 0.91 | 0.696 | 0.696 | 0.470 |
 
-Leave-one-out on the demo: removing semantic evidence costs 0.015 ± 0.009 and removing the general model costs
-0.014 ± 0.015. Removing recency-frequency *improves* NDCG by 0.007 ± 0.006, and removing coverage, co-occurrence,
-temporal, Markov, HMM or the trees changes NDCG by +0.002 to +0.003 (standard error 0.0025). With 11 held-out
-papers these are small effects, and several components add noise on this course. The demo syllabus has no
+Leave-one-out on the demo: removing semantic evidence costs 0.016 ± 0.010, removing the general model 0.016 ± 0.014
+and removing the course logistic 0.005 ± 0.003. Removing recency-frequency *improves* NDCG by 0.005 ± 0.005 and
+removing the Markov component by 0.002 ± 0.001; removing coverage, co-occurrence, temporal, HMM or the trees
+changes NDCG by less than 0.001. With 11 held-out papers these are small effects, and some components add noise on
+this course. The demo syllabus has no
 sub-topics below topics, so concept recall equals topic recall here.
 
 Other demo measurements: alignment puts 127 of 140 in-syllabus questions on the right topic (TF-IDF alone: 128),
@@ -320,8 +322,8 @@ migration test.
 * Alignment's feedback pass uses questions from all papers, so the mapping of an older paper can be influenced by
   wording in later papers. Outcomes (which topics a held-out paper contains) never are.
 * Rank intervals hold classifier components fixed during the leave-one-paper-out step.
-* An analysis takes about 15-20 seconds for a 12-paper course on 4 cores (about 7 seconds before this upgrade),
-  mostly tree models refitted on every fold.
+* An analysis takes about 9 seconds for the 12-paper demo course on 4 cores (about 7 seconds before this
+  upgrade), mostly tree models refitted on every fold.
 
 ## 12. Settings
 
