@@ -22,14 +22,15 @@ FEATURE_GROUPS: dict[str, list[str]] = {
     "recency": ["last1", "freq_last3", "freq_last5", "ewma_short", "ewma_long", "linear_decay"],
     "temporal": ["since_last", "never_seen", "streak_present", "streak_absent", "mean_gap", "gap_cv",
                  "due_z", "hazard", "markov_next", "trend"],
-    "semantic": ["soft_ewma", "soft_mean", "sem_ewma", "sem_neighbors"],
+    "semantic": ["soft_ewma", "soft_mean", "sem_ewma", "sem_neighbors", "sem_density"],
     "bayesian": ["bayes_mean", "bayes_width"],
     "history": ["hist_log", "base_rate"],
     "quality": ["map_conf", "parse_conf", "marks_known"],
+    "structure": ["optional_rate"],
     "marks": ["marks_share", "marks_share_recent", "high_mark_rate"],
     "question_type": ["numerical_share", "derivation_share", "theory_share", "type_entropy"],
     "cooccurrence": ["cooc_lift_last", "unit_ewma"],
-    "syllabus": ["hours_share", "marks_weight_share", "breadth"],
+    "syllabus": ["hours_share", "marks_weight_share", "breadth", "centrality"],
     "recurrence": ["exact_repeat_rate", "para_repeat_rate"],
 }
 FEATURE_NAMES = [f for group in FEATURE_GROUPS.values() for f in group]
@@ -39,6 +40,7 @@ GROUP_LABELS = {
     "semantic": "Semantic similarity", "marks": "Marks weight", "question_type": "Question type",
     "cooccurrence": "Topic co-occurrence", "syllabus": "Syllabus weight", "recurrence": "Question recurrence",
     "bayesian": "Bayesian recurrence", "history": "History length", "quality": "Data quality",
+    "structure": "Exam structure",
 }
 # Scale-free features that mean the same thing in every course. The general ranking model is
 # trained on these (simulated sequences plus other real courses) and the course-specific model
@@ -138,13 +140,17 @@ def compute_features(history: Panel, settings: Settings) -> FeatureMatrix:
     f["base_rate"] = np.full(K, float(Y.mean()))
     # Data quality of the evidence behind each topic (questions before the cutoff only).
     nq_hist = history.n_questions.sum(axis=0)
+    names_q = ("map_conf", "parse_conf", "marks_known", "optional_rate")
     if history.quality is not None and history.quality.shape[:2] == (T, K):
         qsum = history.quality.sum(axis=0)
-        for j, name in enumerate(("map_conf", "parse_conf", "marks_known")):
-            f[name] = np.where(nq_hist > 0, qsum[:, j] / np.maximum(nq_hist, 1), 0.0)
+        for j, name in enumerate(names_q):
+            f[name] = np.where(nq_hist > 0, qsum[:, j] / np.maximum(nq_hist, 1), 0.0) if j < qsum.shape[1] \
+                else np.zeros(K)
     else:
-        for name in ("map_conf", "parse_conf", "marks_known"):
-            f[name] = np.where(nq_hist > 0, 1.0, 0.0)
+        for name in names_q:
+            f[name] = np.where(nq_hist > 0, 1.0, 0.0) if name != "optional_rate" else np.zeros(K)
+    # Share of past papers with clear semantic evidence for the item (exam level, so long papers don't count more).
+    f["sem_density"] = (sem >= 0.2).mean(axis=0)
 
     total = history.total_marks()[:, None]
     share = history.marks / total
@@ -198,6 +204,9 @@ def _static_features(history: Panel, K: int) -> dict[str, np.ndarray]:
     for key in ("hours_share", "marks_weight_share", "breadth"):
         values = st.get(key)
         out[key] = np.asarray(values, dtype=float) if values is not None and len(values) == K else np.zeros(K)
+    # Syllabus centrality: mean (re-centred) similarity of the item to the other items. Syllabus text only.
+    S = history.item_sim
+    out["centrality"] = S.mean(axis=1) if S is not None and S.shape == (K, K) and K > 1 else np.zeros(K)
     return out
 
 

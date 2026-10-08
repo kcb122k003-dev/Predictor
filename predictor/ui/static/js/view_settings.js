@@ -5,16 +5,17 @@ import { append, badge, h, toast } from "./dom.js";
 const FIELDS = [
   ["Syllabus boundary", [
     ["alignment.strictness", "Syllabus strictness", "number", "0 = lenient (uncertain mappings count), 0.5 = clearly in + validated probably in, 1 = only clearly in.", 0.05],
-    ["alignment.thresholds.tfidf.clearly_in", "Clearly-in threshold (offline model)", "number", "Combined match score for status A.", 0.01],
-    ["alignment.thresholds.tfidf.probably_in", "Probably-in threshold (offline model)", "number", "Score for status B.", 0.01],
-    ["alignment.thresholds.tfidf.outside", "Outside threshold (offline model)", "number", "Below this a question is outside the syllabus.", 0.01],
+    ["alignment.thresholds.hybrid.clearly_in", "Clearly-in threshold", "number", "Combined match score for status A (default hybrid model; the TF-IDF-only table is in default.toml).", 0.01],
+    ["alignment.thresholds.hybrid.probably_in", "Probably-in threshold", "number", "Score for status B.", 0.01],
+    ["alignment.thresholds.hybrid.outside", "Outside threshold", "number", "Below this a question is outside the syllabus.", 0.01],
   ]],
   ["Prediction", [
     ["models.top_k", "Top-K for evaluation", "text", "'auto' uses the typical number of topics per paper.", null],
-    ["models.min_train_exams", "Papers before the first backtest target", "number", "Backtesting starts after this many papers.", 1],
-    ["models.selection_rule", "Model selection rule", "select:one_se,best", "one_se prefers the simpler model when the difference is within one standard error.", null],
-    ["temporal.default_half_life", "Recency half-life (papers)", "number", "How quickly older papers lose weight in the Bayesian rate model.", 0.25],
-    ["models.logistic_C", "Logistic regularisation C", "number", "Smaller = stronger regularisation.", 0.05],
+    ["models.min_train_exams", "First held-out paper", "number", "1 = every paper after the first is predicted from the papers before it.", 1],
+    ["temporal.default_half_life", "Default recency half-life (papers)", "number", "Starting half-life of the recency-frequency component; the backtest keeps it unless another decay is reliably better. The Bayesian recurrence tries its own list of half-lives.", 0.25],
+    ["ensemble.skill_temperature", "Ensemble skill temperature", "number", "How strongly a component's measured skill on earlier papers moves its weight (2 = default).", 0.5],
+    ["models.course_prior_precision", "Course model pull toward the general model", "number", "Larger keeps the course-specific logistic model closer to the cross-course model.", 0.5],
+    ["models.use_simulated_prior", "Use the simulated cross-course prior", "checkbox", "The general ranking model is trained on simulated examiner behaviour. Off: it is used only once other real courses are in your library.", null],
   ]],
   ["Text extraction", [
     ["ocr.enabled", "Use OCR for scanned pages and images", "checkbox", "", null],
@@ -45,8 +46,10 @@ export async function renderSettings(main) {
     h("div", { class: "card" }, h("h3", {}, "This computer"),
       h("p", {}, "OCR: ", health.ocr.available ? badge(`Tesseract ${health.ocr.version}`, "ok") : badge("not available", "warn"),
         health.ocr.available ? "" : ` ${health.ocr.reason}`),
-      h("p", {}, "Neural embeddings: ", health.embeddings.neural_available ? badge("ready", "ok") : badge("not installed", "info"),
-        health.embeddings.neural_available ? "" : ` The offline TF-IDF model is used. ${health.embeddings.neural_reason}`),
+      h("p", {}, "Pretrained semantic model: ", health.embeddings.pretrained_available ? badge("ready (bundled, offline)", "ok") : badge("not available", "warn"),
+        health.embeddings.pretrained_available ? "" : ` ${health.embeddings.pretrained_reason} Syllabus alignment uses TF-IDF only.`),
+      h("p", {}, "Larger sentence-transformer: ", health.embeddings.neural_available ? badge("ready", "ok") : badge("not installed", "info"),
+        health.embeddings.neural_available ? "" : " Optional; the bundled model is used."),
       h("p", {}, "External services: ", badge(health.external_services ? "allowed" : "off", health.external_services ? "warn" : "ok"),
         " Nothing is sent over the network."),
       h("p", { class: "help" }, `Data folder: ${health.data_dir}`)));

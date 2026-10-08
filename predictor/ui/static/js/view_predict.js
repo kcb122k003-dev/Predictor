@@ -59,9 +59,14 @@ export async function renderPredict(main, course, { refreshCourse }) {
     const s = run.summary;
     const preds = res.predictions;
     append(body, h("div", { class: "banner warn" }, s.disclaimer));
-    for (const note of s.notes || []) append(body, h("div", { class: "banner warn" }, note));
-    if (res.evidence) append(body, inferenceStatus(res.evidence));
-    else if (res.sufficiency && res.sufficiency.message) append(body, h("div", { class: "banner info" }, res.sufficiency.message));
+    if (res.evidence) {
+      for (const note of s.notes || []) append(body, h("div", { class: "banner warn" }, note));
+      append(body, inferenceStatus(res.evidence));
+    } else {
+      // A run from the engine before the low-data upgrade: its stored notes describe rules that no longer exist.
+      append(body, h("div", { class: "banner info" }, "These results were produced by an earlier version of the engine. ",
+        "Press Analyze & Predict to rank the topics with low-data advanced inference, rank ranges and evidence strength."));
+    }
     append(body, h("div", { class: "grid cols-4" },
       stat(s.exams, "past papers analysed"), stat(s.counted_questions, `of ${s.questions} questions inside the syllabus`),
       stat(s.selected_display, "prediction method used"),

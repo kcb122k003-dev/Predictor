@@ -49,11 +49,9 @@ def _stage_predictions(members: list[str], ctx: ModelContext, ensemble, targets:
     present = [m for m in members if m in ctx.predictions]
     if not present:
         return {}
-    if len(present) == 1 and present[0] not in ensemble.members:
+    if len(present) == 1:
         return {t: ctx.predictions[present[0]][t] for t in targets if t in ctx.predictions[present[0]]}
-    sub = ensemble.subset(present, name)
-    if not sub.members:
-        return {t: ctx.predictions[present[0]][t] for t in targets if t in ctx.predictions[present[0]]}
+    sub = ensemble.subset(present, name)  # cumulative: earlier stages' models (frequency included) stay in
     return {t: np.asarray(sub.predict(t, ctx).scores, dtype=float) for t in targets}
 
 

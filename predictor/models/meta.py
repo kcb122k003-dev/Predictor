@@ -15,10 +15,13 @@
 
       w_m(x) = rho_m * exp(tau * skill_m) * g_m(x)
 
-  rho_m    reliability prior: exams / (exams + df_m), where df_m is the number of parameters
-           the component estimates from this course (0 for the cross-course model). Components
-           that bring outside knowledge (pretrained semantics, syllabus structure) get one extra
-           pseudo-exam. Exams are counted at the exam level; question counts never enter.
+  rho_m    reliability prior: q_m * exams / (exams + df_m), where df_m is the number of parameters
+           the component estimates from this course (0 for the cross-course model) and q_m (0-1)
+           is the quality of its inputs from the evidence profile (mapping confidence, marks and
+           parse completeness, missing calendar years, format variety, syllabus weights,
+           pretrained availability). Components that bring outside knowledge (pretrained
+           semantics, syllabus structure) get one extra pseudo-exam. Exams are counted at the
+           exam level; question counts never enter.
   skill_m  how much better than the average member it ranked earlier papers (folds s < t),
            in units of the within-paper spread between members, shrunk toward 0 by
            folds / (folds + n0).
@@ -152,7 +155,9 @@ class EvidenceEnsemble(BaseModel):
         self.tau, self.n0, self.min_sd, self.gate_strength = tau, prior_folds, min_sd, gate_strength
 
     def subset(self, members: list[str], name: str) -> "EvidenceEnsemble":
-        e = EvidenceEnsemble([m for m in self.members if m in members], self.member_df, self.prior_knowledge, self.displays,
+        """An ensemble over the given models (used by the ablation). Baselines that are not regular members, such
+        as plain frequency, may be included; they are treated as course-estimated with one parameter."""
+        e = EvidenceEnsemble(list(dict.fromkeys(members)), self.member_df, self.prior_knowledge, self.displays,
                              self.tau, self.n0, self.min_sd, self.gate_strength)
         e.name = name
         e.hidden = True
@@ -183,6 +188,10 @@ class EvidenceEnsemble(BaseModel):
         # difficulty, which says nothing about which member is better.
         within = [v - float(np.mean(list(d.values()))) for d in per_fold.values() for v in d.values()]
         sd = max(float(np.std(within)) if len(within) > 1 else 0.0, self.min_sd)
+        from ..inference.evidence import input_quality
+
+        quality = input_quality(ctx.panel.until(t), ctx.panel.meta)
+        pretrained = bool(ctx.panel.meta.get("pretrained", False))
         rows = {}
         for m in available:
             diffs = [d[m] - float(np.mean(list(d.values()))) for d in per_fold.values() if m in d]
@@ -192,10 +201,11 @@ class EvidenceEnsemble(BaseModel):
             df = float(self.member_df.get(m, 1.0))
             # Components that bring outside knowledge (pretrained, syllabus, cross-course) start with one
             # pseudo-exam of evidence; components estimated only from this course start with none.
-            pk = 1.0 if m in self.prior_knowledge else 0.0
-            rho = 1.0 if df <= 0 else (exams + pk) / (exams + pk + df)
-            rows[m] = {"reliability": rho, "skill": skill, "raw_gain": raw, "folds": n,
-                       "base": rho * math.exp(self.tau * skill)}
+            pk = 1.0 if m in self.prior_knowledge and (m != "semantic" or pretrained) else 0.0
+            q, q_why = quality.get(m, (1.0, ""))
+            rho = q * (1.0 if df <= 0 else (exams + pk) / (exams + pk + df))
+            rows[m] = {"reliability": rho, "skill": skill, "raw_gain": raw, "folds": n, "input_quality": q,
+                       "input_note": q_why, "base": rho * math.exp(self.tau * skill)}
         total = sum(r["base"] for r in rows.values())
         if total <= 0:  # no exams at all: only cross-course and syllabus knowledge carry weight
             for m, r in rows.items():
@@ -213,7 +223,7 @@ class EvidenceEnsemble(BaseModel):
         if not members:
             return ModelOutput(np.zeros(K), {"available": False, "unavailable_reason": "no component available",
                                              **_public(info, self.displays)})
-        post = ctx.store.at(t).extras.get("posterior")
+        post = gate_posterior(ctx, t)
         u = np.asarray(post.variance_ratio, dtype=float) if post is not None else np.ones(K)
         P = np.vstack([percentile_rank(ctx.predictions[m][t]) for m in members])  # (M, K)
         G = np.vstack([1.0 + self.gate_strength * u if m in self.prior_knowledge else np.ones(K) for m in members])
@@ -227,6 +237,13 @@ class EvidenceEnsemble(BaseModel):
         return ModelOutput(score, public, contrib, members)
 
 
+def gate_posterior(ctx: ModelContext, t: int):
+    """The Bayesian component's posterior for target t (the variant it chose), else the features' no-decay one."""
+    out = ctx.outputs.get("beta_binomial", {}).get(t)
+    post = out.info.get("posterior") if out is not None else None
+    return post if post is not None else ctx.store.at(t).extras.get("posterior")
+
+
 def _public(info: dict[str, Any], displays: dict[str, str]) -> dict[str, Any]:
     return {
         "weights": {m: round(r["weight"], 4) for m, r in info["rows"].items()},
@@ -234,6 +251,8 @@ def _public(info: dict[str, Any], displays: dict[str, str]) -> dict[str, Any]:
         "skill": {m: round(r["skill"], 4) for m, r in info["rows"].items()},
         "raw_gain": {m: round(r["raw_gain"], 4) for m, r in info["rows"].items()},
         "skill_folds": {m: r["folds"] for m, r in info["rows"].items()},
+        "input_quality": {m: round(r["input_quality"], 3) for m, r in info["rows"].items()},
+        "input_note": {m: r["input_note"] for m, r in info["rows"].items()},
         "excluded": info["excluded"], "exams": info["exams"], "weight_folds": info["folds"],
         "displays": {m: displays.get(m, m) for m in list(info["rows"]) + list(info["excluded"])},
     }

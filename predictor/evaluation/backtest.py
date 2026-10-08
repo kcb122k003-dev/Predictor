@@ -141,7 +141,8 @@ def ci95(values: list[float]) -> list[float | None]:
         return [None, None]
     m, se = float(arr.mean()), float(arr.std(ddof=1) / math.sqrt(arr.size))
     q = float(stats.t.ppf(0.975, arr.size - 1))
-    return [m - q * se, m + q * se]
+    # Ranking metrics live in [0, 1]; with few folds the t-interval would run past both ends.
+    return [max(0.0, m - q * se), min(1.0, m + q * se)]
 
 
 def ordered_models(models: list[BaseModel]) -> list[BaseModel]:
@@ -182,7 +183,9 @@ class BacktestEngine:
                          "cross-course model.")
         elif not targets:
             notes.append("One past paper: there is no earlier paper to test a prediction against, so the ranking "
-                         "cannot be validated yet. Pretrained, cross-course and Bayesian components still run.")
+                         "cannot be validated yet. "
+                         + ("Pretrained, cross-course and Bayesian components still run." if panel.meta.get("pretrained")
+                            else "Cross-course and Bayesian components still run."))
 
         for m in self.models:
             ok, why = m.gate(panel, ctx)
@@ -381,6 +384,10 @@ def validation_summary(report: BacktestReport, panel: Panel) -> dict[str, Any]:
     if n < 2:
         out["message"] = (f"{panel.T} papers give {n} held-out fold. One fold shows whether the ranking was sensible "
                           f"for that paper but cannot measure reliability; treat the accuracy figure as anecdotal.")
+    elif n < 4:
+        out["message"] = (f"{panel.T} papers give {n} held-out folds. That is too few for a useful confidence "
+                          f"interval (the 95% interval of the final ranking's {p.upper()}@{report.k} spans "
+                          f"{out['ci95'][0]:.2f}-{out['ci95'][1]:.2f}); treat differences between methods as noise.")
     else:
         out["message"] = (f"{panel.T} papers give {n} held-out folds. The 95% confidence interval of the final "
                           f"ranking's {p.upper()}@{report.k} is {width:.2f} wide"

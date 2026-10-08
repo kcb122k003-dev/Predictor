@@ -87,7 +87,9 @@ def topic_uncertainty(panel, settings, report, models: list, general=None, draws
                         continue
                     model = _member_model(m, report, by_name)
                     scores[m] = model.predict(t, ctx).scores if model is not None else report.final_outputs[m].scores
-                s = combine(scores, store.at(t).extras.get("posterior"))
+                bb_model = _member_model("beta_binomial", report, by_name)
+                bb_post = bb_model.predict(t, ctx).info.get("posterior") if bb_model is not None else None
+                s = combine(scores, bb_post if bb_post is not None else store.at(t).extras.get("posterior"))
             else:
                 model = _member_model(sel, report, by_name)
                 s = model.predict(t, ctx).scores
@@ -103,7 +105,9 @@ def topic_uncertainty(panel, settings, report, models: list, general=None, draws
     if use_ensemble:
         members = ens.info["members"]
         member_scores = {m: report.final_outputs[m].scores for m in members}
-        fm_post = report.ctx.store.at(T).extras.get("posterior") if report.ctx is not None else None
+        from ..models.meta import gate_posterior
+
+        fm_post = gate_posterior(report.ctx, T) if report.ctx is not None else None
         w0 = np.array([max(ens.info["weights"][m], 1e-6) for m in members])
         w0 = w0 / w0.sum()
         concentration = 2.0 + 4.0 * float(ens.info.get("weight_folds", 0) or 0)
@@ -123,6 +127,8 @@ def topic_uncertainty(panel, settings, report, models: list, general=None, draws
     hi = np.maximum(jack_arr.max(axis=0), q_hi)
     lo = np.minimum(lo, base_ranks)
     hi = np.maximum(hi, base_ranks)
+    if T == 0:  # nothing observed: the order comes from prior knowledge alone and any rank is possible
+        lo, hi = np.ones(K), np.full(K, float(K))
     width = hi - lo
     level = np.where(width < 0.2 * K, "Low", np.where(width < 0.4 * K, "Medium", "High"))
     # A topic whose estimate rests mostly on prior knowledge is never shown as certain, however stable

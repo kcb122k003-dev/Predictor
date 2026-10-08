@@ -190,6 +190,10 @@ random_seed = 13
 # Prior precision of the course-specific logistic model around the general model's weights
 # (per standardised coefficient). Larger = stays closer to the general model.
 course_prior_precision = 2.0
+# The general ranking model starts from a prior trained on simulated examiner behaviour
+# (inference/generic_prior.json). false = no simulated knowledge: the general component is
+# unavailable and the course logistic is centred on zero until other real courses exist.
+use_simulated_prior = true
 forest_trees = 60
 forest_min_leaf = 5
 gbm_max_iter = 100

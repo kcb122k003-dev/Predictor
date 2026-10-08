@@ -21,7 +21,7 @@ from sqlalchemy import delete, select
 
 from ..database.models import Course, CourseFeatureSet, ModelRegistry
 from ..features.builder import GENERIC_FEATURES
-from .generic import VERSION, GeneralModel, load_prior, update_with_rows
+from .generic import VERSION, GeneralModel, flat_prior, load_prior, prior_fingerprint, update_with_rows
 
 _CACHE: dict[str, GeneralModel] = {}
 
@@ -43,16 +43,19 @@ def training_sets(session, exclude_course_id: int | None, layer: str = "topic") 
     return [r for r in rows if r.course_id != exclude_course_id and r.feature_names == GENERIC_FEATURES and r.n_rows]
 
 
-def general_model_for(session, course_id: int | None, layer: str = "topic") -> tuple[GeneralModel, dict[str, Any]]:
-    prior = load_prior()
+def general_model_for(session, course_id: int | None, layer: str = "topic",
+                      use_simulated: bool = True) -> tuple[GeneralModel, dict[str, Any]]:
+    """The general model for a course and a record of where it came from (also written to model_registry)."""
+    prior = load_prior() if use_simulated else flat_prior()
     sets = training_sets(session, course_id, layer)
     if not sets:
-        info = {"source": prior.source, "real_courses": 0, "real_rows": 0}
-        return prior, info
+        key = prior_fingerprint() if use_simulated else f"{VERSION}:none"
+        _register_global(session, key, prior, {"courses": [], "rows": 0, "excluded_course": course_id})
+        return prior, {"source": prior.source, "real_courses": 0, "real_rows": 0, "fingerprint": key}
     h = hashlib.sha256()
     for r in sets:
         h.update(f"{r.course_id}:{r.run_id}:{r.n_rows}|".encode())
-    key = f"{VERSION}:{layer}:{h.hexdigest()[:16]}"
+    key = f"{VERSION}:{layer}:{prior.source}:{h.hexdigest()[:16]}"
     model = _CACHE.get(key)
     if model is None:
         p = len(GENERIC_FEATURES)
@@ -60,13 +63,20 @@ def general_model_for(session, course_id: int | None, layer: str = "topic") -> t
         y = np.concatenate([np.frombuffer(r.y, dtype=np.float32) for r in sets]).astype(float)
         model = update_with_rows(prior, X, y, n_courses=len(sets))
         _CACHE[key] = model
-        session.add(ModelRegistry(scope="global", course_id=None, name="general", version=str(VERSION),
-                                  source=model.source, fingerprint=key, params=model.to_dict(),
-                                  training={"courses": [r.course_id for r in sets], "rows": int(len(y)),
-                                            "excluded_course": course_id}))
+    _register_global(session, key, model, {"courses": [r.course_id for r in sets],
+                                           "rows": int(sum(r.n_rows for r in sets)), "excluded_course": course_id})
     info = {"source": model.source, "real_courses": len(sets), "real_rows": int(sum(r.n_rows for r in sets)),
             "fingerprint": key}
     return model, info
+
+
+def _register_global(session, key: str, model: GeneralModel, training: dict[str, Any]) -> None:
+    """One row per distinct general model ever used (scope "global"); runs record its fingerprint."""
+    exists = session.execute(select(ModelRegistry.id).where(ModelRegistry.scope == "global",
+                                                            ModelRegistry.fingerprint == key)).first()
+    if exists is None:
+        session.add(ModelRegistry(scope="global", course_id=None, name="general", version=str(VERSION),
+                                  source=model.source, fingerprint=key, params=model.to_dict(), training=training))
 
 
 def register_course_model(session, course_id: int, run_id: int, name: str, params: dict[str, Any],

@@ -205,3 +205,19 @@ def test_semantic_evidence_is_capped_per_paper():
     sem = panel.semantic_matrix()
     assert sem.max() <= 1.0 + 1e-12
     assert sem[:, 1].sum() > sem[:, 0].sum()  # four papers beat one long paper
+
+
+def test_input_quality_changes_component_reliability(fast_settings):
+    clean = planted(8, seed=2)
+    poor = planted(8, seed=2)
+    poor.quality = poor.quality.copy()
+    poor.quality[:, :, 0] *= 0.2  # weak syllabus mapping
+    poor.quality[:, :, 2] = 0.0  # no marks anywhere
+    for p in (clean, poor):
+        p.meta["pretrained"] = True
+    a = BacktestEngine(clean, fast_settings).run(audit_leakage=False).final_outputs["ensemble"].info
+    b = BacktestEngine(poor, fast_settings).run(audit_leakage=False).final_outputs["ensemble"].info
+    assert b["reliability"]["semantic"] < a["reliability"]["semantic"]
+    assert b["reliability"]["logistic"] < a["reliability"]["logistic"]
+    assert b["reliability"]["general"] == a["reliability"]["general"]  # outside knowledge is unaffected
+    assert "mapping confidence 20%" in b["input_note"]["semantic"]

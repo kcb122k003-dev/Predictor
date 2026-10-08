@@ -87,6 +87,7 @@ class Leaf:
     path_label: str
     manual: list[tuple[int, str]] = field(default_factory=list)  # (topic id, status)
     parse_confidence: float = 1.0
+    optional: bool = False
     format: str = "theory"
     alignment: AlignmentResult | None = None
     counted: list[tuple[int, float]] = field(default_factory=list)  # (mappable node id, weight)
@@ -176,9 +177,8 @@ class AnalysisService:
             exams = s.execute(select(Exam).where(Exam.course_id == course_id, Exam.include_in_analysis.is_(True),
                                                  Exam.source.notin_(NON_HISTORICAL_SOURCES))
                               .order_by(Exam.order_index, Exam.id)).scalars().all()
-            if not exams:
-                raise AnalysisError("No past papers are included in the analysis. Upload papers and make sure each "
-                                    "has a year (Review tab).")
+            # With no past paper the ranking comes from the syllabus structure and the cross-course model
+            # (and every topic is marked highly uncertain); there is no minimum number of papers.
             infos, leaves, exam_rows = [], [], []
             for idx, e in enumerate(exams):
                 rows = s.execute(select(ExamQuestion).where(ExamQuestion.exam_id == e.id)
@@ -196,7 +196,8 @@ class AnalysisService:
                                        list(q.question_types or []), q.type_user_edited, list(q.options or []),
                                        q.path_label, manual,
                                        parse_confidence=float(q.parse_confidence if q.parse_confidence is not None
-                                                              else 1.0)))
+                                                              else 1.0),
+                                       optional=bool(q.is_optional or q.or_group)))
             snapshot = [(e.id, e.order_index, e.structure, e.full_marks, e.duration,
                          [(q.id, q.parent_id, q.label, q.marks, q.or_group, q.is_optional, q.is_leaf, q.text, q.section_id)
                           for q in rows]) for e, rows in exam_rows]
@@ -278,11 +279,15 @@ class AnalysisService:
                                           **panel_args)
         for panel in (topic_panel, concept_panel, unfiltered_panel):
             panel.meta["semantic_source"] = getattr(backend, "name", "alignment")
+            panel.meta["pretrained"] = pretrained is not None
 
         # 6. Backtest ---------------------------------------------------------------
         self._progress(run_id, 0.38, "Backtesting every component on past exams")
         with self.app.db.session() as s:
-            general, general_info = general_model_for(s, course_id)
+            general, general_info = general_model_for(s, course_id,
+                                                      use_simulated=bool(settings.models.use_simulated_prior))
+            run_row = s.get(AnalysisRun, run_id)
+            run_row.config = {**(run_row.config or {}), "general_model": general_info}
         engine = BacktestEngine(topic_panel, settings, general=general)
         report = engine.run()
         self._progress(run_id, 0.55, "Backtesting the concept layer")
@@ -573,7 +578,8 @@ class AnalysisService:
                                           status=q.status, soft=soft, semantic=semantic,
                                           exact_repeat=bool(recurrence.exact_prev.get(q.id)),
                                           para_repeat=bool(recurrence.para_prev.get(q.id)),
-                                          mapping_confidence=_mapping_confidence(q), parse_confidence=q.parse_confidence))
+                                          mapping_confidence=_mapping_confidence(q), parse_confidence=q.parse_confidence,
+                                          optional=q.optional))
         labels = [tree.nodes[i].label() for i in item_ids]
         item_unit = np.array([unit_col.get(tree.unit_of(i), 0) for i in item_ids], dtype=int)
         static = _static_features(tree, item_ids, unit_ids)

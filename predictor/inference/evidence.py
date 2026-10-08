@@ -142,12 +142,17 @@ def component_status(report, profile: EvidenceProfile) -> list[dict[str, Any]]:
                                    f"weight {r.weight:.1%}.")
             elif (r.reliability or 0.0) < 0.5:
                 r.status = LIMITED
+                note = info.get("input_note", {}).get(r.name, "")
                 r.status_reason = (f"Running with reliability {r.reliability:.2f}: it estimates about {r.df:g} "
-                                   f"parameter(s) from this course and only {profile.effective_exams:g} paper(s) exist; "
-                                   f"weight {r.weight:.1%}.")
+                                   f"parameter(s) from this course and only {profile.effective_exams:g} paper(s) exist"
+                                   + (f" ({note})" if note else "") + f"; weight {r.weight:.1%}.")
             else:
                 r.status = ACTIVE
-                r.status_reason = f"Weight {r.weight:.1%}, reliability {r.reliability:.2f}."
+                note = info.get("input_note", {}).get(r.name, "")
+                r.status_reason = f"Weight {r.weight:.1%}, reliability {r.reliability:.2f}" + (f" ({note})." if note else ".")
+            if r.name == "semantic" and not profile.pretrained and r.status != UNAVAILABLE:
+                r.status_reason = ("The pretrained model is unavailable, so semantic evidence comes from TF-IDF "
+                                   "alignment only. " + r.status_reason)
         elif r.role == "ensemble":
             r.status, r.status_reason = ACTIVE, "Combines the components below."
         else:
@@ -180,3 +185,49 @@ def low_data_message(profile: EvidenceProfile, report) -> tuple[str, str]:
     return ("Advanced inference",
             f"{T} historical examinations are available. {sem}; course-specific learned components carry weight in "
             f"proportion to their measured skill on earlier papers.")
+
+
+TEMPORAL_COMPONENTS = ("recency", "beta_binomial", "hazard", "markov", "hmm", "cooccurrence")
+WEIGHT_SOURCE_QUALITY = {"teaching hours": 1.0, "marks weights": 1.0, "breadth (sub-topics and concepts)": 0.7,
+                         "uniform": 0.5}
+
+
+def input_quality(history, panel_meta: dict) -> dict[str, tuple[float, str]]:
+    """Quality (0-1) of each component's inputs, from papers before the cutoff only.
+
+    It multiplies the component's reliability prior, so the evidence profile (question mapping
+    confidence, metadata completeness, calendar coverage, format variety, syllabus weights, pretrained
+    availability) changes the weights, not only the report.
+    """
+    from ..models.components import syllabus_share
+
+    T = history.T
+    out: dict[str, tuple[float, str]] = {}
+    nq = float(history.n_questions.sum()) if T else 0.0
+    if history.quality is not None and nq > 0:
+        q = history.quality.sum(axis=(0, 1)) / nq
+        map_conf, parse_conf, marks_known = float(q[0]), float(q[1]), float(q[2])
+    else:
+        map_conf = parse_conf = marks_known = 1.0
+    pretrained = bool(panel_meta.get("pretrained", False))
+    sem = (0.5 + 0.5 * map_conf) * (1.0 if pretrained else 0.8)
+    out["semantic"] = (sem, f"mapping confidence {map_conf:.0%}" + ("" if pretrained else ", TF-IDF only"))
+    formats = int((history.formats.sum(axis=(0, 1)) > 0).sum()) if T else 0
+    out["question_type"] = (min(1.0, max(formats, 1) / 3.0), f"{formats} question format(s) seen")
+    source = syllabus_share(history)[1]
+    out["coverage"] = (WEIGHT_SOURCE_QUALITY.get(source, 0.7), f"syllabus weights from {source}")
+    years = sorted({e.year for e in history.exams if e.year is not None})
+    if len(years) >= 2:
+        span = years[-1] - years[0] + 1
+        missing = span - len(years)
+        temporal = 1.0 - 0.5 * missing / span
+        why = f"{missing} missing calendar year(s) in {span}"
+    else:
+        temporal, why = 1.0, "calendar coverage not measurable yet"
+    for m in TEMPORAL_COMPONENTS:
+        out[m] = (temporal, why)
+    learned = 0.5 + 0.25 * marks_known + 0.25 * parse_conf
+    for m in COURSE_LEARNED:
+        out[m] = (learned, f"marks known {marks_known:.0%}, parse confidence {parse_conf:.0%}")
+    out["general"] = (1.0, "cross-course knowledge")
+    return out

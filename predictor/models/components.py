@@ -243,6 +243,9 @@ class GeneralRankingModel(BaseModel):
 
     def predict(self, t: int, ctx: ModelContext) -> ModelOutput:
         gm = ctx.general_model()
+        if gm.source == "none":
+            return unavailable(ctx.panel.K, "The simulated cross-course prior is switched off and no other real course "
+                                            "is in your library yet.")
         X = ctx.store.at(t).X[:, generic_columns()]
         return ModelOutput(gm.predict(X), {"source": gm.source, "summary": gm.summary},
                            gm.contributions(X), list(GENERIC_FEATURES))
@@ -251,7 +254,7 @@ class GeneralRankingModel(BaseModel):
 COURSE_ONLY = ["count_log", "soft_ewma", "soft_mean", "sem_ewma", "sem_neighbors", "marks_share", "marks_share_recent",
                "high_mark_rate", "numerical_share", "derivation_share", "theory_share", "type_entropy",
                "hours_share", "marks_weight_share", "breadth", "exact_repeat_rate", "para_repeat_rate",
-               "map_conf", "parse_conf", "marks_known"]
+               "map_conf", "parse_conf", "marks_known", "optional_rate", "sem_density", "centrality"]
 
 
 class CourseLogisticModel(BaseModel):

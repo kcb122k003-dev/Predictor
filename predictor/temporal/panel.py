@@ -46,6 +46,7 @@ class QuestionRecord:
     para_repeat: bool = False
     mapping_confidence: float = 1.0
     parse_confidence: float = 1.0
+    optional: bool = False  # optional / OR-alternative question
 
 
 @dataclass
@@ -67,8 +68,8 @@ class Panel:
     semantic: np.ndarray | None = None
     item_sim: np.ndarray | None = None  # (K, K) syllabus-only similarity between items (no exam text)
     format_prior: np.ndarray | None = None  # (K, F) format tendency from syllabus tags (no exam text)
-    # (T, K, 3) data-quality sums over the questions behind each cell: mapping confidence, parse/OCR
-    # confidence, marks known (divide by n_questions for means).
+    # (T, K, 4) sums over the questions behind each cell: mapping confidence, parse/OCR confidence,
+    # marks known, optional/OR question (divide by n_questions for means).
     quality: np.ndarray | None = None
     item_unit: np.ndarray | None = None  # (K,) unit column index per item (for unit features)
     unit_ids: list[int] = field(default_factory=list)
@@ -131,7 +132,7 @@ def build_panel(exams: list[ExamInfo], item_ids: list[int], item_labels: list[st
     exact = np.zeros((T, K))
     para = np.zeros((T, K))
     semantic = np.zeros((T, K))
-    quality = np.zeros((T, K, 3))
+    quality = np.zeros((T, K, 4))
     f_index = {f: i for i, f in enumerate(FORMATS)}
     for q in questions:
         t = q.exam_index
@@ -154,7 +155,8 @@ def build_panel(exams: list[ExamInfo], item_ids: list[int], item_labels: list[st
             if q.marks is not None:
                 marks[t, col] += q.marks * w / total_w
             formats[t, col, f_index.get(q.format, f_index["theory"])] += 1
-            quality[t, col] += (q.mapping_confidence, q.parse_confidence, 1.0 if q.marks is not None else 0.0)
+            quality[t, col] += (q.mapping_confidence, q.parse_confidence, 1.0 if q.marks is not None else 0.0,
+                                1.0 if q.optional else 0.0)
             if q.exact_repeat:
                 exact[t, col] += 1
             if q.para_repeat:

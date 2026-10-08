@@ -224,6 +224,22 @@ def load_prior() -> GeneralModel:
     return train_simulated(n_courses=120)
 
 
+def flat_prior() -> GeneralModel:
+    """No simulated knowledge: zero weights at the generic base rate (the general component then reports itself
+    unavailable, and the course logistic is centred on zero)."""
+    base = load_prior()
+    return GeneralModel(base.features, base.mean.copy(), base.std.copy(), np.zeros_like(base.coef),
+                        float(np.log(0.4 / 0.6)), "none", {"simulated_courses": 0, "rows": 0, "real_courses": 0,
+                                                           "real_rows": 0})
+
+
+def prior_fingerprint() -> str:
+    import hashlib
+
+    data = PRIOR_FILE.read_bytes() if PRIOR_FILE.exists() else b"retrained"
+    return f"{VERSION}:prior:{hashlib.sha256(data).hexdigest()[:16]}"
+
+
 def update_with_rows(prior: GeneralModel, X: np.ndarray, y: np.ndarray, n_courses: int,
                      precision: float = REPOSITORY_PRIOR_PRECISION) -> GeneralModel:
     """Update the general model with real rows from other courses (MAP around the prior)."""
@@ -232,7 +248,8 @@ def update_with_rows(prior: GeneralModel, X: np.ndarray, y: np.ndarray, n_course
     Z = prior.standardize(X)
     coef, b = fit_map_logistic(Z, y, prior.coef, prior.intercept, precision)
     summary = {**prior.summary, "real_courses": int(n_courses), "real_rows": int(len(y))}
-    return GeneralModel(prior.features, prior.mean, prior.std, coef, b, "simulation+repository", summary)
+    source = "simulation+repository" if prior.source != "none" else "repository"
+    return GeneralModel(prior.features, prior.mean, prior.std, coef, b, source, summary)
 
 
 def main() -> None:  # pragma: no cover - maintenance entry point
