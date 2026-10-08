@@ -40,7 +40,7 @@ def test_results_flow(client):
     assert detail["questions"] and detail["topic"]["path"]
     models = c.get(f"/api/runs/{run['id']}/models").json()
     assert any(m["selected"] for m in models["models"])
-    for key in ("charts", "structure", "coverage", "ablation", "calibration", "papers", "sufficiency"):
+    for key in ("charts", "structure", "coverage", "ablation", "calibration", "papers", "sufficiency", "evidence"):
         assert c.get(f"/api/runs/{run['id']}/artifacts/{key}").status_code == 200
     papers = c.post(f"/api/runs/{run['id']}/papers", json={"seed": 11, "variants": 2}).json()["papers"]
     assert len(papers) == 2 and "hypothetical" in papers[0]["title"]

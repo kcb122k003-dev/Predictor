@@ -1,67 +1,116 @@
-"""Builds the list of candidate models from settings."""
+"""Builds the list of baselines, ensemble components and the evidence-aware ensemble from settings."""
 
 from __future__ import annotations
 
 from ..config.settings import Settings
 from .base import BaseModel
-from .learned import GradientBoostingModel, LogisticModel, PooledHMMModel, RandomForestModel
-from .meta import EnsembleModel, TunedModel
-from .statistical import (BetaBinomialModel, EwmaModel, FreqRecencyModel, FrequencyModel, HazardModel,
-                          LastExamModel, LinearDecayModel, MarkovModel, RandomModel, SemanticModel, WindowModel)
+from .components import (BayesianRecurrenceModel, CooccurrenceModel, CourseLogisticModel, CoverageModel,
+                         GeneralRankingModel, QuestionTypeModel, SemanticComponent, TemporalModel)
+from .learned import GradientBoostingModel, PooledHMMModel, RandomForestModel
+from .meta import EvidenceEnsemble, TunedModel
+from .statistical import (EwmaModel, FreqRecencyModel, FrequencyModel, LastExamModel, LinearDecayModel, MarkovModel,
+                          RandomModel, WindowModel)
 
-DEFAULT_FALLBACK = "beta_binomial"
+FINAL_MODEL = "ensemble"
+# Order matters only for display; meta models always run after the models they combine.
+COMPONENT_ORDER = ["recency", "beta_binomial", "semantic", "coverage", "question_type", "cooccurrence", "hazard",
+                   "markov", "hmm", "general", "logistic", "gradient_boosting", "random_forest"]
+
+
+def _shown(model: BaseModel, visible: bool) -> BaseModel:
+    """A baseline built only as a variant of another model is hidden from reports."""
+    if not visible:
+        model.hidden = True
+    return model
 
 
 def build_models(settings: Settings) -> list[BaseModel]:
     enabled = set(settings.models.enabled)
     models: list[BaseModel] = []
+    by_name: dict[str, BaseModel] = {}
+
+    def add(m: BaseModel) -> None:
+        models.append(m)
+        by_name[m.name] = m
 
     def want(name: str) -> bool:
         return name in enabled
 
+    windows = sorted({int(w) for w in settings.temporal.windows})
+    hls = sorted({float(h) for h in settings.temporal.half_lives} | {float(settings.temporal.default_half_life)})
+    default_ewma = EwmaModel(float(settings.temporal.default_half_life)).name
+    need_variants = want("window") or want("ewma") or want("recency")
+
     if want("random"):
-        models.append(RandomModel())
-    if want("frequency"):
-        models.append(FrequencyModel())
+        add(RandomModel())
+    if want("frequency") or want("recency"):
+        add(_shown(FrequencyModel(), want("frequency")))
     if want("last_exam"):
-        models.append(LastExamModel())
+        add(LastExamModel())
+    if need_variants:
+        for w in windows:
+            add(WindowModel(w))
+        for h in hls:
+            add(EwmaModel(h))
+    if want("linear_decay") or want("recency"):
+        add(_shown(LinearDecayModel(), want("linear_decay")))
     if want("window"):
-        windows = sorted({int(w) for w in settings.temporal.windows})
-        variants = [WindowModel(w) for w in windows]
-        models.extend(variants)
         default = f"window[{3 if 3 in windows else windows[len(windows) // 2]}]"
-        models.append(TunedModel("window", "Recent-window frequency", [v.name for v in variants], default,
-                                 description="Share of the last N exams with the topic; N chosen on earlier exams."))
+        add(TunedModel("window", "Recent-window frequency", [f"window[{w}]" for w in windows], default,
+                       description="Share of the last N exams with the topic; N chosen on earlier exams."))
     if want("ewma"):
-        hls = sorted({float(h) for h in settings.temporal.half_lives} | {float(settings.temporal.default_half_life)})
-        variants = [EwmaModel(h) for h in hls]
-        models.extend(variants)
-        default = EwmaModel(float(settings.temporal.default_half_life)).name
-        models.append(TunedModel("ewma", "Recency-weighted frequency", [v.name for v in variants], default,
-                                 description="Exponentially decaying weights on older exams; half-life chosen "
-                                             "on earlier exams."))
-    if want("linear_decay"):
-        models.append(LinearDecayModel())
+        add(TunedModel("ewma", "Recency-weighted frequency", [EwmaModel(h).name for h in hls], default_ewma,
+                       description="Exponentially decaying weights on older exams; half-life chosen on earlier exams."))
     if want("freq_recency"):
-        models.append(FreqRecencyModel())
+        add(FreqRecencyModel())
+    if want("recency"):
+        variants = ["frequency", "linear_decay"] + [f"window[{w}]" for w in windows] + [EwmaModel(h).name for h in hls]
+        add(TunedModel("recency", "Recency-frequency (decay chosen by backtest)", variants, default_ewma,
+                       description=("Topic frequency with a decay strategy (none, linear, last-N window or exponential "
+                                    "half-life) chosen on earlier papers; the default is kept unless another strategy "
+                                    "is reliably better."), family="recency", role="component", df=1.0))
     if want("beta_binomial"):
-        models.append(BetaBinomialModel())
+        half_lives = [None] + [float(h) for h in settings.temporal.bayes_half_lives]
+        variants = [BayesianRecurrenceModel(h) for h in half_lives]
+        for v in variants:
+            add(v)
+        # Default before a course's own papers show otherwise: half-life 6 exams. On 300 simulated courses
+        # (seed 4242, not used for training) it beat no decay by 0.003 NDCG (standard error 0.001).
+        default = next((v.name for v in variants if v.half_life == 6.0), variants[0].name)
+        add(TunedModel("beta_binomial", "Hierarchical Bayesian recurrence", [v.name for v in variants],
+                       default, complexity=3,
+                       description=("Beta-binomial over exams with partial pooling (course, unit, topic) and an "
+                                    "empirical-Bayes prior strength; recency discount chosen on earlier papers. Gives "
+                                    "a posterior mean, credible interval and the share of the estimate that comes "
+                                    "from the prior."), family="bayesian", role="component", df=1.0))
     if want("markov"):
-        models.append(MarkovModel())
+        add(MarkovModel())
     if want("hazard"):
-        models.append(HazardModel())
+        add(TemporalModel())
     if want("semantic"):
-        models.append(SemanticModel())
+        add(SemanticComponent())
+    if want("coverage"):
+        add(CoverageModel())
+    if want("question_type"):
+        add(QuestionTypeModel())
+    if want("cooccurrence"):
+        add(CooccurrenceModel())
+    if want("general"):
+        add(GeneralRankingModel())
     if want("logistic"):
-        models.append(LogisticModel())
+        add(CourseLogisticModel())
     if want("random_forest"):
-        models.append(RandomForestModel())
+        add(RandomForestModel())
     if want("gradient_boosting"):
-        models.append(GradientBoostingModel())
+        add(GradientBoostingModel())
     if want("hmm"):
-        models.append(PooledHMMModel())
+        add(PooledHMMModel())
     if want("ensemble"):
-        candidates = [m.name for m in models if not m.hidden and m.name not in ("random",)]
-        defaults = [n for n in ("ewma", "beta_binomial", "frequency") if n in candidates]
-        models.append(EnsembleModel(candidates, defaults or candidates[:3], int(settings.models.ensemble_max_members)))
+        cfg = settings.ensemble
+        members = [n for n in COMPONENT_ORDER if n in by_name]
+        add(EvidenceEnsemble(members, {n: by_name[n].df for n in members},
+                             {n for n in members if by_name[n].prior_knowledge},
+                             {n: by_name[n].display for n in members}, tau=float(cfg.skill_temperature),
+                             prior_folds=float(cfg.skill_prior_folds), min_sd=float(cfg.min_metric_sd),
+                             gate_strength=float(cfg.gate_strength)))
     return models

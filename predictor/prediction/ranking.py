@@ -15,6 +15,7 @@ import numpy as np
 from ..config.settings import Settings
 from ..evaluation.backtest import BacktestReport
 from ..features.builder import GROUP_LABELS, GROUP_OF, FeatureMatrix
+from ..inference.bayes import evidence_label
 from ..models.base import percentile_rank
 from ..temporal import dynamics as dyn
 from ..temporal.panel import FORMATS, Panel
@@ -44,6 +45,10 @@ class TopicPrediction:
     contributions: dict[str, float]
     contribution_source: str
     why_not: list[str] = field(default_factory=list)
+    evidence_strength: str = ""
+    uncertainty: dict[str, Any] = field(default_factory=dict)
+    signal_contributions: dict[str, float] = field(default_factory=dict)
+    signal_source: str = ""
 
 
 def _fmt_pct(x: float) -> str:
@@ -74,7 +79,8 @@ def build_topic_predictions(panel: Panel, report: BacktestReport, fm: FeatureMat
                             explain_output=None, mapping_confidence: np.ndarray | None = None,
                             rotation: dict[int, Any] | None = None, type_forecast: dict[int, Any] | None = None,
                             syllabus_location: dict[int, str] | None = None,
-                            lab_items: set[int] | None = None) -> list[TopicPrediction]:
+                            lab_items: set[int] | None = None, uncertainty: dict[str, Any] | None = None,
+                            semantic_evidence: dict[int, list[dict[str, Any]]] | None = None) -> list[TopicPrediction]:
     cfg = settings.prediction
     scores = np.asarray(report.final_scores, dtype=float)
     K = len(scores)
@@ -88,14 +94,18 @@ def build_topic_predictions(panel: Panel, report: BacktestReport, fm: FeatureMat
     base_rate = float(panel.Y.mean()) if panel.Y.size else 0.0
     m = report.k
     haz = dyn.pooled_hazard(panel.Y, float(settings.temporal.hazard_prior_strength)) if T else None
-    contributions, contrib_source = _contributions(explain_output, report, K)
+    contributions, contrib_source = component_contributions(report, K)
+    signals, signal_source = _contributions(explain_output, report, K)
+    bb = report.final_outputs.get("beta_binomial")
+    post = bb.info.get("posterior") if bb is not None else None
+    temporal = report.final_outputs.get("hazard")
 
     preds: list[TopicPrediction] = []
     for i in range(K):
-        signals = supporting_signals(fm, i, base_rate)
+        signals_for = supporting_signals(fm, i, base_rate)
         if probs is not None:
             p, lo, hi = float(probs[0][i]), float(probs[1][i]), float(probs[2][i])
-            if p >= float(cfg.very_high) and len(signals) >= int(cfg.min_signals_very_high):
+            if p >= float(cfg.very_high) and len(signals_for) >= int(cfg.min_signals_very_high):
                 cat = CATEGORY_ORDER[0]
             elif p >= float(cfg.high):
                 cat = CATEGORY_ORDER[1]
@@ -107,7 +117,7 @@ def build_topic_predictions(panel: Panel, report: BacktestReport, fm: FeatureMat
             p = lo = hi = None
             r = ranks[i]
             top_share = max(1, math.ceil(m * float(cfg.very_high_rank_share)))
-            if r <= top_share and len(signals) >= int(cfg.min_signals_very_high):
+            if r <= top_share and len(signals_for) >= int(cfg.min_signals_very_high):
                 cat = CATEGORY_ORDER[0]
             elif r <= m:
                 cat = CATEGORY_ORDER[1]
@@ -117,15 +127,27 @@ def build_topic_predictions(panel: Panel, report: BacktestReport, fm: FeatureMat
                 cat = CATEGORY_ORDER[3]
         facts = _facts(panel, fm, i, haz, mapping_confidence, rotation, type_forecast)
         facts["is_lab"] = bool(lab_items and panel.item_ids[i] in lab_items)
-        conf = _confidence(T, settings, facts, p, lo, hi, probs is not None)
+        unc = _uncertainty_entry(uncertainty, i, ranks[i], K)
+        if post is not None:
+            facts["bayes"] = post.summary(i)
+        if temporal is not None:
+            facts["temporal_mode"] = temporal.info.get("mode")
+            facts["temporal_log_bayes_factor"] = temporal.info.get("log_bayes_factor")
+        if semantic_evidence and panel.item_ids[i] in semantic_evidence:
+            facts["semantic_evidence"] = semantic_evidence[panel.item_ids[i]]
+        strength = evidence_label(float(post.prior_contribution[i])) if post is not None else "Minimal"
+        conf = _confidence(facts, p, lo, hi, probs is not None, unc)
         evidence = _evidence_lines(panel, facts, syllabus_location.get(panel.item_ids[i]) if syllabus_location else None)
+        evidence += _model_lines(facts, unc, contributions[i] if contributions else None, strength)
         preds.append(TopicPrediction(
             item_index=i, item_id=panel.item_ids[i], label=panel.item_labels[i], rank=int(ranks[i]),
             score=round(float(scores[i]), 5), relative_score=round(float(rel[i]), 4),
             probability=None if p is None else round(p, 4), prob_low=None if lo is None else round(lo, 4),
             prob_high=None if hi is None else round(hi, 4), calibrated=probs is not None, category=cat,
-            confidence=conf, signals_for=signals, facts=facts, evidence=evidence,
-            contributions=contributions[i] if contributions else {}, contribution_source=contrib_source))
+            confidence=conf, signals_for=signals_for, facts=facts, evidence=evidence,
+            contributions=contributions[i] if contributions else {}, contribution_source=contrib_source,
+            evidence_strength=strength, uncertainty=unc,
+            signal_contributions=signals[i] if signals else {}, signal_source=signal_source))
     preds.sort(key=lambda p: p.rank)
     n_why = int(cfg.why_not_count)
     for pred in preds:
@@ -140,6 +162,19 @@ def build_topic_predictions(panel: Panel, report: BacktestReport, fm: FeatureMat
     return preds
 
 
+def component_contributions(report: BacktestReport, K: int) -> tuple[list[dict[str, float]] | None, str]:
+    """Each ensemble component's share of the final score (weight x percentile rank), per topic."""
+    out = report.final_outputs.get(report.selected)
+    if out is None or out.contributions is None or report.selected != "ensemble":
+        return None, ""
+    displays = out.info.get("displays", {})
+    names = out.contribution_names or []
+    rows = []
+    for i in range(K):
+        rows.append({displays.get(n, n): round(float(out.contributions[i, j]), 4) for j, n in enumerate(names)})
+    return rows, "evidence-aware ensemble (component weight x the component's percentile rank of the topic)"
+
+
 def _contributions(explain_output, report: BacktestReport, K: int) -> tuple[list[dict[str, float]] | None, str]:
     if explain_output is None or explain_output.contributions is None:
         return None, ""
@@ -151,9 +186,15 @@ def _contributions(explain_output, report: BacktestReport, K: int) -> tuple[list
             g = GROUP_LABELS[GROUP_OF[name]]
             groups[g] = groups.get(g, 0.0) + float(explain_output.contributions[i, j])
         out.append({g: round(v, 4) for g, v in groups.items()})
-    source = ("logistic regression (the selected model)" if report.selected == "logistic"
-              else f"the logistic explanation model (the selected model is {report.models[report.selected].display})")
-    return out, source
+    return out, ("signal contributions to the log-odds of the course-specific logistic model (standardised features "
+                 "x weights; positive raises the topic)")
+
+
+def _uncertainty_entry(unc: dict[str, Any] | None, i: int, rank: int, K: int) -> dict[str, Any]:
+    if not unc:
+        return {}
+    lo, hi = int(unc["rank_low"][i]), int(unc["rank_high"][i])
+    return {"rank_low": lo, "rank_high": hi, "level": unc["level"][i], "rank": int(rank), "topics": K}
 
 
 def _facts(panel: Panel, fm: FeatureMatrix, i: int, haz, mapping_confidence, rotation, type_forecast) -> dict[str, Any]:
@@ -206,21 +247,52 @@ def _facts(panel: Panel, fm: FeatureMatrix, i: int, haz, mapping_confidence, rot
     return facts
 
 
-def _confidence(T: int, settings: Settings, facts: dict[str, Any], p, lo, hi, calibrated: bool) -> str:
-    low_exams = int(settings.models.sufficiency.low_confidence_exams)
-    if T < low_exams or facts.get("appearances", 0) == 0:
-        return "Low"
+def _confidence(facts: dict[str, Any], p, lo, hi, calibrated: bool, unc: dict[str, Any]) -> str:
+    """Confidence in the topic's position, from its rank uncertainty, syllabus match and calibration.
+
+    There is no rule based on the number of papers: few papers show up as wide rank
+    intervals and a large prior share, which is what lowers confidence.
+    """
     mc = facts.get("mapping_confidence")
     if mc is not None and mc < 0.55:
         return "Low"
-    if calibrated and hi is not None and lo is not None:
-        width = hi - lo
-        if width <= 0.2 and T >= 10 and (mc is None or mc >= 0.7):
-            return "High"
-        if width > 0.35:
-            return "Low"
-        return "Medium"
-    return "Medium" if T >= 10 else "Low"
+    level = unc.get("level") if unc else None
+    if level == "High":
+        return "Low"
+    if calibrated and hi is not None and lo is not None and hi - lo > 0.35:
+        return "Low"
+    if level == "Low" and (mc is None or mc >= 0.7) and (not calibrated or (hi - lo) <= 0.2):
+        return "High"
+    return "Medium"
+
+
+def _model_lines(facts: dict[str, Any], unc: dict[str, Any], contrib: dict[str, float] | None, strength: str) -> list[str]:
+    lines = []
+    b = facts.get("bayes")
+    if b:
+        lo, hi = b["credible_interval"]
+        obs = b["observed"]
+        lines.append(f"Bayesian recurrence: {_fmt_pct(b['posterior_mean'])} chance of appearing (80% credible interval "
+                     f"{_fmt_pct(lo)}-{_fmt_pct(hi)}), from {obs['appearances']} appearance(s) in {obs['exams']} paper(s); "
+                     f"{_fmt_pct(b['prior_contribution'])} of the estimate comes from the unit and course prior. "
+                     f"Evidence strength: {strength}.")
+    mode = facts.get("temporal_mode")
+    if mode:
+        bf = facts.get("temporal_log_bayes_factor")
+        lines.append(f"Temporal component: {mode}" + (f" (prequential log Bayes factor {bf:+.2f} for the gap hazard)."
+                                                      if bf is not None else "."))
+    sem = facts.get("semantic_evidence")
+    if sem:
+        best = sem[0]
+        lines.append(f"Most similar past question ({best['exam']}, similarity {best['similarity']:.2f}): "
+                     f"\"{best['text'][:140]}\"")
+    if contrib:
+        top = sorted(contrib.items(), key=lambda kv: -kv[1])[:3]
+        lines.append("Largest contributions to the final score: " + ", ".join(f"{k} {v:.2f}" for k, v in top) + ".")
+    if unc:
+        lines.append(f"Rank uncertainty: between {unc['rank_low']} and {unc['rank_high']} of {unc['topics']} "
+                     f"({unc['level'].lower()} uncertainty).")
+    return lines
 
 
 def _evidence_lines(panel: Panel, f: dict[str, Any], location: str | None) -> list[str]:
@@ -307,6 +379,10 @@ def _why_not(pred: TopicPrediction, panel: Panel, haz, base_rate: float, mapping
         out.append(f"Weak semantic evidence: its historical questions match the syllabus at only {_fmt_pct(mc)}.")
     if 0 < f["appearances"] < 2:
         out.append("Insufficient evidence: one appearance cannot establish a pattern.")
+    unc = pred.uncertainty
+    if unc and unc.get("level") == "High":
+        out.append(f"High uncertainty: with the available papers its rank could be anywhere from {unc['rank_low']} to "
+                   f"{unc['rank_high']}.")
     if not out:
         out.append("Other topics have stronger combined evidence; the gap to the cut-off is small.")
     return out

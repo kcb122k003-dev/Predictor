@@ -49,7 +49,8 @@ def cmd_demo(args) -> int:
     ctx = _ctx(args)
     ingest = IngestService(ctx)
     cid = CourseService(ctx).create("Fluid Mechanics (synthetic demo)", "CE 501",
-                                    "Generated example data with planted patterns. Not real exams.")
+                                    "Generated example data with planted patterns. Not real exams.",
+                                    is_synthetic=True)
     with tempfile.TemporaryDirectory() as tmp:
         generate_demo(Path(tmp))
         for kind, folder in (("syllabus", "syllabus"), ("exam", "exams")):

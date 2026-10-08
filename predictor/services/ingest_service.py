@@ -175,7 +175,10 @@ class IngestService:
         frac = float(md.get("session_fraction") or 0.5)
         order = order_index_for(year, calendar, frac, etype)
         label_bits = [str(year) if year else "Year?", md.get("session") or "", etype.title() if etype else ""]
-        return Exam(course_id=course_id, source_file_id=file_id, title=(md.get("title") or "")[:400],
+        with self.app.db.session() as s:
+            course = s.get(Course, course_id)
+            source = "demo" if course is not None and course.is_synthetic else "upload"
+        return Exam(course_id=course_id, source_file_id=file_id, source=source, title=(md.get("title") or "")[:400],
                     subject=(md.get("subject") or "")[:400], year=year, calendar=calendar,
                     session=md.get("session") or "", exam_type=etype, exam_date=md.get("exam_date") or "",
                     order_index=order if year else 0.0, full_marks=md.get("full_marks"), pass_marks=md.get("pass_marks"),

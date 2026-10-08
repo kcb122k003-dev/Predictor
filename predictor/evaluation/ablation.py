@@ -1,111 +1,192 @@
-"""Ablation study (spec sections 62 and 63).
+"""Ablation study on the same held-out papers as the main backtest.
 
-Two views, both on the same held-out folds as the main backtest:
+Staged additions (each stage is the evidence-aware ensemble restricted to the listed
+components, with weights learned exactly as in the full model):
 
-* Leave-one-group-out: the logistic model without one feature group at a time.
-* Staged additions: frequency only, then + recency, + temporal dynamics, + semantic, then
-  all groups. Each step shows the incremental benefit (or harm) of a signal family.
+    frequency -> + recency -> + Bayesian smoothing -> + semantic -> + topic structure
+    -> + temporal dynamics -> full ensemble (+ cross-course and course-learned models)
 
-A separate check runs the selected model on a panel built without the syllabus filter
-(uncertain and out-of-syllabus questions forced onto their nearest topic) and scores it
-against the filtered ground truth.
+and leave-one-component-out from the full ensemble. Every row reports Hit@1/3/5,
+Recall@K, Precision@K and NDCG@K on topics, recall@K on concepts (finest syllabus level)
+and recall of exactly repeated questions, with the paired change against the previous stage
+and its standard error. A change within about one standard error is not a reliable
+difference, and with few papers most changes are within it; the table says so instead of
+claiming an improvement.
+
+A separate check scores the final model with and without the syllabus filter against the
+filtered ground truth.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
-from ..config.settings import Settings
-from ..features.builder import FEATURE_GROUPS, GROUP_LABELS, FeatureStore
-from ..models.base import BaseModel, ModelContext
-from ..models.learned import LogisticModel
+from ..models.base import ModelContext
 from ..temporal.panel import Panel
 from .metrics import mean_and_se, ranking_metrics
 
-STAGES = [
-    ("Frequency only", ("frequency",)),
-    ("+ recency", ("frequency", "recency")),
-    ("+ temporal dynamics", ("frequency", "recency", "temporal")),
-    ("+ semantic similarity", ("frequency", "recency", "temporal", "semantic")),
-    ("All signals", tuple(FEATURE_GROUPS)),
+STAGES: list[tuple[str, list[str]]] = [
+    ("Frequency only", ["frequency"]),
+    ("+ recency", ["frequency", "recency"]),
+    ("+ Bayesian smoothing", ["beta_binomial"]),
+    ("+ semantic", ["semantic"]),
+    ("+ topic structure", ["coverage", "question_type", "cooccurrence"]),
+    ("+ temporal dynamics", ["hazard", "markov", "hmm"]),
+    ("Full ensemble", ["general", "logistic", "gradient_boosting", "random_forest"]),
 ]
+METRICS = ["hit@1", "hit@3", "hit@5", "recall", "precision", "ndcg"]
 
 
-def _evaluate(model: BaseModel, panel: Panel, store: FeatureStore, settings: Settings, targets: list[int],
-              k: int, primary: str, labels: np.ndarray | None = None) -> dict[int, float]:
-    ctx = ModelContext(panel=panel, store=store, settings=settings, seed=int(settings.models.random_seed))
-    Y = panel.Y if labels is None else labels
-    out = {}
-    for t in targets:
-        scores = model.predict(t, ctx).scores
-        out[t] = ranking_metrics(scores, Y[t], k)[primary]
-    return out
-
-
-def _summary(name: str, folds: dict[int, float], reference: dict[int, float] | None) -> dict[str, Any]:
-    mean, se = mean_and_se(list(folds.values()))
-    row = {"variant": name, "mean": _r(mean), "se": _r(se)}
-    if reference:
-        diffs = [folds[t] - reference[t] for t in folds if t in reference]
-        d_mean, d_se = mean_and_se(diffs)
-        row["delta"] = _r(d_mean)
-        row["delta_se"] = _r(d_se)
-        wins = sum(1 for d in diffs if d > 1e-9)
-        losses = sum(1 for d in diffs if d < -1e-9)
-        row["folds_better"], row["folds_worse"] = wins, losses
-    return row
-
-
-def _r(v: float) -> float | None:
+def _r(v: float | None) -> float | None:
     return None if v is None or (isinstance(v, float) and math.isnan(v)) else round(float(v), 4)
 
 
-def run_ablation(panel: Panel, settings: Settings, store: FeatureStore, targets: list[int], k: int,
-                 primary: str, logistic_enabled: bool, logistic_reason: str = "") -> dict[str, Any]:
-    if not targets:
-        return {"available": False, "reason": "No backtest folds are available."}
-    if not logistic_enabled:
-        return {"available": False,
-                "reason": ("The ablation study varies the feature groups of the logistic model, which is disabled "
-                           f"for this course: {logistic_reason}")}
-    full = _evaluate(LogisticModel(), panel, store, settings, targets, k, primary)
-    leave_one = [_summary("All signals", full, None)]
-    for group in FEATURE_GROUPS:
-        model = LogisticModel(exclude_groups=(group,), name=f"logistic-no-{group}")
-        folds = _evaluate(model, panel, store, settings, targets, k, primary)
-        row = _summary(f"Without {GROUP_LABELS[group].lower()}", folds, full)
-        row["group"] = group
+def _stage_predictions(members: list[str], ctx: ModelContext, ensemble, targets: list[int], name: str
+                       ) -> dict[int, np.ndarray]:
+    present = [m for m in members if m in ctx.predictions]
+    if not present:
+        return {}
+    if len(present) == 1 and present[0] not in ensemble.members:
+        return {t: ctx.predictions[present[0]][t] for t in targets if t in ctx.predictions[present[0]]}
+    sub = ensemble.subset(present, name)
+    if not sub.members:
+        return {t: ctx.predictions[present[0]][t] for t in targets if t in ctx.predictions[present[0]]}
+    return {t: np.asarray(sub.predict(t, ctx).scores, dtype=float) for t in targets}
+
+
+def _metrics(preds: dict[int, np.ndarray], panel: Panel, targets: list[int], k: int) -> dict[int, dict[str, float]]:
+    return {t: ranking_metrics(preds[t], panel.Y[t], k) for t in targets if t in preds}
+
+
+def _row(label: str, folds: dict[int, dict[str, float]], previous: dict[int, dict[str, float]] | None,
+         extra: dict[str, dict[int, float]], prev_extra: dict[str, dict[int, float]] | None) -> dict[str, Any]:
+    row: dict[str, Any] = {"variant": label, "folds": len(folds)}
+    for m in METRICS:
+        mean, se = mean_and_se([f[m] for f in folds.values()])
+        row[m] = _r(mean)
+        row[f"{m}_se"] = _r(se)
+    for key, vals in extra.items():
+        mean, se = mean_and_se(list(vals.values()))
+        row[key] = _r(mean)
+        row[f"{key}_se"] = _r(se)
+    if previous:
+        common = [t for t in folds if t in previous]
+        diffs = [folds[t]["ndcg"] - previous[t]["ndcg"] for t in common]
+        d, se = mean_and_se(diffs)
+        row["delta"], row["delta_se"] = _r(d), _r(se)
+        row["folds_better"] = sum(1 for x in diffs if x > 1e-9)
+        row["folds_worse"] = sum(1 for x in diffs if x < -1e-9)
+        row["reliable"] = bool(not math.isnan(se) and abs(d) > se) if diffs else False
+        for key, vals in extra.items():
+            if prev_extra and key in prev_extra:
+                c = [t for t in vals if t in prev_extra[key]]
+                dd, ss = mean_and_se([vals[t] - prev_extra[key][t] for t in c])
+                row[f"{key}_delta"], row[f"{key}_delta_se"] = _r(dd), _r(ss)
+    return row
+
+
+def run_ablation(report, concept_report=None, recurrence_fn: Callable[[dict[int, np.ndarray]], dict[int, float]] | None
+                 = None) -> dict[str, Any]:
+    targets = report.targets
+    ctx = report.ctx
+    if not targets or ctx is None:
+        return {"available": False, "reason": ("No held-out paper exists yet (one paper or none), so no ablation can "
+                                               "be measured. Every component still runs.")}
+    from ..models.meta import EvidenceEnsemble
+
+    ensemble = next((m for m in _models_of(ctx) if isinstance(m, EvidenceEnsemble)), None)
+    if ensemble is None:
+        return {"available": False, "reason": "The evidence-aware ensemble is not enabled in Settings."}
+    panel = ctx.panel
+    k = report.k
+    c_ens = None
+    if concept_report is not None and concept_report.ctx is not None:
+        c_ens = next((m for m in _models_of(concept_report.ctx) if isinstance(m, EvidenceEnsemble)), None)
+
+    def extras(members: list[str], name: str, preds: dict[int, np.ndarray]) -> dict[str, dict[int, float]]:
+        out: dict[str, dict[int, float]] = {}
+        if c_ens is not None and concept_report.targets:
+            cp = _stage_predictions(members, concept_report.ctx, c_ens, concept_report.targets, name)
+            if cp:
+                out["concept_recall"] = {t: ranking_metrics(cp[t], concept_report.ctx.panel.Y[t], concept_report.k)["recall"]
+                                         for t in cp if concept_report.ctx.panel.Y[t].sum() > 0}
+        if recurrence_fn is not None and preds:
+            rec = recurrence_fn(preds)
+            if rec:
+                out["exact_recurrence_recall"] = rec
+        return out
+
+    staged, prev, prev_extra = [], None, None
+    members: list[str] = []
+    for i, (label, add) in enumerate(STAGES):
+        members = members + add
+        name = f"ablation-stage-{i}"
+        preds = _stage_predictions(members, ctx, ensemble, targets, name)
+        if not preds:
+            continue
+        folds = _metrics(preds, panel, targets, k)
+        ex = extras(members, name, preds)
+        staged.append(_row(label, folds, prev, ex, prev_extra))
+        prev, prev_extra = folds, ex
+    full_members = list(ensemble.members)
+    full = _stage_predictions(full_members, ctx, ensemble, targets, "ablation-full")
+    full_folds = _metrics(full, panel, targets, k)
+    leave_one = [_row("Full ensemble", full_folds, None, {}, None)]
+    for m in full_members:
+        if m not in ctx.predictions:
+            continue
+        rest = [x for x in full_members if x != m]
+        preds = _stage_predictions(rest, ctx, ensemble, targets, f"ablation-no-{m}")
+        if not preds:
+            continue
+        row = _row(f"Without {ensemble.displays.get(m, m)}", _metrics(preds, panel, targets, k), full_folds, {}, None)
+        row["component"] = m
         leave_one.append(row)
-    staged = []
-    prev: dict[int, float] | None = None
-    for label, groups in STAGES:
-        excluded = tuple(g for g in FEATURE_GROUPS if g not in groups)
-        model = LogisticModel(exclude_groups=excluded, name=f"logistic-stage-{len(staged)}")
-        folds = _evaluate(model, panel, store, settings, targets, k, primary)
-        staged.append(_summary(label, folds, prev))
-        prev = folds
-    return {"available": True, "metric": f"{primary}@{k}", "leave_one_out": leave_one, "staged": staged,
-            "note": ("Delta is the paired difference against the full model (leave-one-out) or the previous stage "
-                     "(staged). A delta within about one standard error is not a reliable difference.")}
+    n = len(targets)
+    reliable = [r["variant"] for r in staged[1:] if r.get("reliable")]
+    note = ("Each stage adds components to the evidence-aware ensemble; 'Change' is the paired NDCG difference "
+            "against the previous stage over the same held-out papers, with its standard error. ")
+    if n < 5:
+        note += (f"With {n} held-out paper(s) the standard errors are large, so these differences show direction only "
+                 f"and do not establish that a stage helps.")
+    elif reliable:
+        note += "Stages whose change exceeds one standard error: " + ", ".join(reliable) + "."
+    else:
+        note += "No stage changed NDCG by more than one standard error on these papers."
+    return {"available": True, "metric": f"ndcg@{k}", "k": k, "folds": n, "staged": staged, "leave_one_out": leave_one,
+            "metrics": METRICS, "note": note}
+
+
+def _models_of(ctx: ModelContext) -> list:
+    return list(ctx.cache.get("models", []))
 
 
 def syllabus_filter_check(filtered_predictions: dict[int, np.ndarray], unfiltered_predictions: dict[int, np.ndarray],
                           filtered: Panel, unfiltered: Panel, targets: list[int], k: int, primary: str,
                           model_display: str) -> dict[str, Any]:
-    """Score the selected model with and without the syllabus filter against the filtered ground truth."""
+    """Score the final model with and without the syllabus filter against the filtered ground truth."""
     targets = [t for t in targets if t in filtered_predictions and t in unfiltered_predictions]
     if not targets:
-        return {"available": False, "reason": "No backtest folds are available."}
+        return {"available": False, "reason": "No held-out paper is available yet."}
     with_filter = {t: ranking_metrics(filtered_predictions[t], filtered.Y[t], k)[primary] for t in targets}
     without = {t: ranking_metrics(unfiltered_predictions[t], filtered.Y[t], k)[primary] for t in targets}
     extra = float((unfiltered.Y - filtered.Y).clip(min=0).sum())
+
+    def summary(name, folds, ref):
+        mean, se = mean_and_se(list(folds.values()))
+        row = {"variant": name, "mean": _r(mean), "se": _r(se)}
+        if ref:
+            d, s = mean_and_se([folds[t] - ref[t] for t in folds if t in ref])
+            row["delta"], row["delta_se"] = _r(d), _r(s)
+        return row
+
     return {
         "available": True, "metric": f"{primary}@{k}", "model": model_display,
-        "with_filter": _summary("With syllabus filter", with_filter, None),
-        "without_filter": _summary("Without syllabus filter", without, with_filter),
+        "with_filter": summary("With syllabus filter", with_filter, None),
+        "without_filter": summary("Without syllabus filter", without, with_filter),
         "extra_appearances_without_filter": int(extra),
         "note": ("Without the filter, uncertain and out-of-syllabus questions are forced onto their nearest topic. "
                  "Both runs are scored against the filtered ground truth."),

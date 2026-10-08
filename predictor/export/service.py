@@ -54,6 +54,10 @@ class ExportService:
                 "probability": _pct(p["probability"]) if p["calibrated"] else "",
                 "probability_range": f"{_pct(p['prob_low'])}-{_pct(p['prob_high'])}" if p["calibrated"] else "",
                 "relative_score": p["relative_score"], "confidence": p["confidence"],
+                "evidence_strength": p.get("evidence_strength", ""),
+                "rank_range": (f"{p['uncertainty']['rank_low']}-{p['uncertainty']['rank_high']}"
+                               if (p.get("uncertainty") or {}).get("rank_low") is not None else ""),
+                "uncertainty": (p.get("uncertainty") or {}).get("level", ""),
                 "recent_appearances": f"{facts.get('recent_appearances', '')}/{facts.get('recent_window', '')}",
                 "total_appearances": f"{facts.get('appearances', '')}/{facts.get('exams', '')}",
                 "last_appearance": facts.get("last_label") or "never",
@@ -65,14 +69,17 @@ class ExportService:
             for line in p["why_not"]:
                 evidence_rows.append({"topic": p["label"], "kind": "why not", "text": line})
             for group, value in (p["contributions"] or {}).items():
-                evidence_rows.append({"topic": p["label"], "kind": "contribution", "text": f"{group}: {value:+.3f}"})
-        model_rows = [{"layer": m["layer"], "model": m["display"], "enabled": m["enabled"], "selected": m["selected"],
+                evidence_rows.append({"topic": p["label"], "kind": "component share", "text": f"{group}: {value:.3f}"})
+            for group, value in (p.get("signal_contributions") or {}).items():
+                evidence_rows.append({"topic": p["label"], "kind": "signal (log-odds)", "text": f"{group}: {value:+.3f}"})
+        model_rows = [{"layer": m["layer"], "model": m["display"], "role": m.get("role", ""), "status": m.get("status", ""),
+                       "weight": m.get("weight"), "reliability": m.get("reliability"), "selected": m["selected"],
                        "ndcg": m["metrics"].get("ndcg"), "ndcg_se": m["se"].get("ndcg"),
                        "recall": m["metrics"].get("recall"), "precision": m["metrics"].get("precision"),
                        "hit_rate": m["metrics"].get("hit_rate"), "mrr": m["metrics"].get("mrr"),
                        "hit@1": m["metrics"].get("hit@1"), "hit@3": m["metrics"].get("hit@3"),
                        "hit@5": m["metrics"].get("hit@5"), "hit@10": m["metrics"].get("hit@10"),
-                       "why_disabled": m["gate_reason"]} for m in models["models"]]
+                       "status_reason": (m.get("evidence") or {}).get("status_reason", "")} for m in models["models"]]
         fold_rows = [{"model": f["model"], "target_exam": f["target"], "train_exams": f["train_exams"],
                       **{k: v for k, v in f["metrics"].items() if k in ("ndcg", "recall", "precision", "hit_rate", "mrr")}}
                      for f in models["folds"]]
@@ -129,7 +136,7 @@ class ExportService:
     def json(self, run_id: int) -> bytes:
         payload = {"run": self.results.run(run_id), "tables": self.tables(run_id)}
         for key in ("structure", "coverage", "ablation", "calibration", "type_forecast", "families", "papers",
-                    "sufficiency", "syllabus_filter"):
+                    "sufficiency", "evidence", "syllabus_filter"):
             try:
                 payload[key] = self.results.artifact(run_id, key)
             except KeyError:
@@ -145,7 +152,9 @@ class ExportService:
             ["Course", name], ["Generated", datetime.now().strftime("%Y-%m-%d %H:%M")],
             ["Important", DISCLAIMER], ["Exams analysed", summary.get("exams")],
             ["Questions", summary.get("questions")], ["Topics", summary.get("topics")],
+            ["Inference", f"{summary.get('inference_mode') or ''}: {summary.get('inference_message') or ''}"],
             ["Model used", summary.get("selected_display")], ["Why this model", summary.get("selection_reason")],
+            ["Validation", (summary.get("validation") or {}).get("message", "")],
             ["Probabilities", summary.get("calibration_reason")],
             ["Notes", " ".join(summary.get("notes") or [])],
         ]
@@ -182,24 +191,24 @@ class ExportService:
                   p(f"Course: {about['Course']}   |   Generated {about['Generated']}"), Spacer(1, 4),
                   p(DISCLAIMER, warn), Spacer(1, 6)]
         story.append(Paragraph("Summary", styles["Heading2"]))
-        for label in ("Exams analysed", "Questions", "Topics", "Model used", "Why this model", "Probabilities"):
+        for label in ("Exams analysed", "Questions", "Topics", "Inference", "Model used", "Why this model", "Validation",
+                      "Probabilities"):
             story.append(p(f"{label}: {about[label]}"))
         for note in summary.get("notes") or []:
             story.append(p(note, warn))
-        suff = (summary.get("sufficiency") or {}).get("message")
-        if suff:
-            story.append(p(suff, warn))
 
         story.append(Paragraph("Ranked topics", styles["Heading2"]))
         calibrated = summary.get("calibrated")
         head = ["#", "Topic", "Priority", "Probability" if calibrated else "Relative score", "Confidence",
-                "Recent", "Last seen", "Format"]
+                "Evidence", "Rank range", "Recent", "Last seen"]
         data = [head]
         for r in tables["predictions"][:40]:
             value = f"{r['probability']} ({r['probability_range']})" if calibrated else f"{r['relative_score']:.2f}"
             data.append([r["rank"], Paragraph(escape(r["topic"]), small), r["category"].replace(" Priority", ""),
-                         value, r["confidence"], r["recent_appearances"], r["last_appearance"], r["likely_format"]])
-        t = Table(data, repeatRows=1, colWidths=[8 * mm, 62 * mm, 22 * mm, 26 * mm, 18 * mm, 14 * mm, 24 * mm, 18 * mm])
+                         value, r["confidence"], r["evidence_strength"], r["rank_range"], r["recent_appearances"],
+                         r["last_appearance"]])
+        t = Table(data, repeatRows=1, colWidths=[8 * mm, 54 * mm, 20 * mm, 24 * mm, 17 * mm, 16 * mm, 15 * mm, 12 * mm,
+                                                 22 * mm])
         t.setStyle(TableStyle([("FONTSIZE", (0, 0), (-1, -1), 7.5), ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e8ecf2")),
                                ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#c8ced8")), ("VALIGN", (0, 0), (-1, -1), "TOP")]))
         story.append(t)
@@ -240,16 +249,16 @@ class ExportService:
                 story.append(p(f"{x['label']}: {' '.join(x['why_not'])}", small))
 
         story.append(PageBreak())
-        story.append(Paragraph("Model comparison (time-ordered backtest)", styles["Heading2"]))
-        mrows = [["Model", "Selected", "NDCG", "Recall", "Hit@3", "Hit@5", "Status"]]
+        story.append(Paragraph("Components and model comparison (time-ordered backtest)", styles["Heading2"]))
+        mrows = [["Model", "Final", "Status", "Weight", "NDCG", "Recall", "Hit@3", "Why"]]
         for m in tables["models"]:
             if m["layer"] != "topic":
                 continue
             fmt = lambda v: "" if v is None else f"{v:.3f}"
-            mrows.append([Paragraph(escape(m["model"]), small), "yes" if m["selected"] else "", fmt(m["ndcg"]),
-                          fmt(m["recall"]), fmt(m["hit@3"]), fmt(m["hit@5"]),
-                          Paragraph(escape("enabled" if m["enabled"] else m["why_disabled"]), small)])
-        mt = Table(mrows, repeatRows=1, colWidths=[46 * mm, 15 * mm, 15 * mm, 15 * mm, 15 * mm, 15 * mm, 60 * mm])
+            mrows.append([Paragraph(escape(m["model"]), small), "yes" if m["selected"] else "", m["status"],
+                          "" if m["weight"] is None else f"{100 * m['weight']:.0f}%", fmt(m["ndcg"]), fmt(m["recall"]),
+                          fmt(m["hit@3"]), Paragraph(escape(m["status_reason"] or ""), small)])
+        mt = Table(mrows, repeatRows=1, colWidths=[42 * mm, 10 * mm, 22 * mm, 13 * mm, 13 * mm, 13 * mm, 13 * mm, 52 * mm])
         mt.setStyle(TableStyle([("FONTSIZE", (0, 0), (-1, -1), 7.5), ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e8ecf2")),
                                 ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#c8ced8")), ("VALIGN", (0, 0), (-1, -1), "TOP")]))
         story.append(mt)
@@ -259,9 +268,11 @@ class ExportService:
             ablation = {}
         story.append(Paragraph("Ablation study", styles["Heading3"]))
         if ablation.get("available"):
+            story.append(p(ablation.get("note", ""), small))
             for row in ablation.get("staged", []):
                 delta = "" if row.get("delta") is None else f" (change {row['delta']:+.3f} +/- {row.get('delta_se') or 0:.3f})"
-                story.append(p(f"{row['variant']}: {row['mean']}{delta}", small))
+                story.append(p(f"{row['variant']}: NDCG {row.get('ndcg')}{delta}; Hit@3 {row.get('hit@3')}; "
+                               f"Recall@K {row.get('recall')}", small))
         else:
             story.append(p(ablation.get("reason", "Not available."), small))
         if tables["excluded"]:

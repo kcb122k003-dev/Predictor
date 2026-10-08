@@ -32,13 +32,19 @@ from ..analysis.coverage import cooccurrence, topic_coverage, unit_coverage
 from ..analysis.structure import ExamSummary, LeafInfo, MainQuestion, discover_structure
 from ..database.models import (AnalysisArtifact, AnalysisRun, BacktestFold, Course, CourseTopic, Exam, ExamQuestion,
                                ModelResult, PredictedQuestion, Prediction, QuestionTopicMapping, SyllabusVersion)
-from ..embeddings.backends import get_backend
+from ..embeddings.backends import get_backend, get_pretrained
 from ..embeddings.index import DbEmbeddingCache
 from ..evaluation.ablation import run_ablation, syllabus_filter_check
 from ..evaluation.backtest import BacktestEngine, BacktestReport
 from ..features.builder import GROUP_LABELS
 from ..generation.paper import simulate_papers
 from ..generation.questions import HistoricalQuestion, generate_formulations
+from ..generation.verify import FormulationVerifier
+from ..inference.evidence import build_profile, component_status, low_data_message
+from ..inference.generic import panel_rows
+from ..inference.repository import general_model_for, register_course_model, save_course_features
+from ..inference.uncertainty import topic_uncertainty
+from ..models.components import syllabus_share
 from ..parsing.question_types import QuestionTypeClassifier
 from ..prediction.families import backtest_families, predict_families
 from ..prediction.ranking import CATEGORY_ORDER, DISCLAIMER, build_topic_predictions
@@ -56,6 +62,11 @@ from .syllabus_store import current_version, to_tree, topics_of
 
 log = get_logger("analysis")
 RANK_WEIGHTS = {1: 1.0, 2: 0.5, 3: 0.33}
+ENGINE_VERSION = "2.0"
+# Exams with these sources never enter an analysis (nothing creates them; this is a guard).
+NON_HISTORICAL_SOURCES = ("generated", "simulated")
+KIND_FORMATS = {"numerical": "numerical", "derivation": "derivation", "theory": "theory", "definition": "definition",
+                "diagram": "diagram", "objective": "objective"}
 
 
 class AnalysisError(RuntimeError):
@@ -149,7 +160,9 @@ class AnalysisService:
                 vt = topics_of(s, course_id, v.id)
                 if vt:
                     historical.append((v.label, to_tree(vt)))
-            exams = s.execute(select(Exam).where(Exam.course_id == course_id, Exam.include_in_analysis.is_(True))
+            synthetic = bool(course.is_synthetic)
+            exams = s.execute(select(Exam).where(Exam.course_id == course_id, Exam.include_in_analysis.is_(True),
+                                                 Exam.source.notin_(NON_HISTORICAL_SOURCES))
                               .order_by(Exam.order_index, Exam.id)).scalars().all()
             if not exams:
                 raise AnalysisError("No past papers are included in the analysis. Upload papers and make sure each "
@@ -173,19 +186,20 @@ class AnalysisService:
             snapshot = [(e.id, e.order_index, e.structure, e.full_marks, e.duration,
                          [(q.id, q.parent_id, q.label, q.marks, q.or_group, q.is_optional, q.is_leaf, q.text, q.section_id)
                           for q in rows]) for e, rows in exam_rows]
-        return settings, tree, historical, infos, leaves, snapshot
+        return settings, tree, historical, infos, leaves, snapshot, synthetic
 
     # ------------------------------------------------------------------- main
     def _run(self, run_id: int, started: float) -> dict[str, Any]:
         with self.app.db.session() as s:
             course_id = s.get(AnalysisRun, run_id).course_id
         self._progress(run_id, 0.03, "Loading syllabus and papers")
-        settings, tree, historical, infos, leaves, snapshot = self._load(course_id)
+        settings, tree, historical, infos, leaves, snapshot, synthetic = self._load(course_id)
         notes: list[str] = []
         cache = DbEmbeddingCache(self.app.db.new_session)
         backend, backend_note = get_backend(settings, cache)
         if backend_note:
             notes.append(backend_note)
+        pretrained, pretrained_note = get_pretrained(settings)
 
         # 2. Alignment ----------------------------------------------------------
         self._progress(run_id, 0.1, "Mapping questions to the syllabus")
@@ -229,6 +243,8 @@ class AnalysisService:
         fam_qs = [FamilyQuestion(q.id, q.exam_index, q.text,
                                  tree.topic_of(primary_node[q.id]) if primary_node[q.id] else None,
                                  primary_node[q.id]) for q in leaves]
+        # Character n-grams found reworded repeats better than the bundled static embeddings on the
+        # demo and paraphrase checks, so only a full sentence-transformer replaces them here.
         recurrence = find_recurrence(fam_qs, settings, backend if backend.kind == "neural" else None)
 
         # 5. Panels ---------------------------------------------------------------
@@ -236,23 +252,54 @@ class AnalysisService:
         topic_ids = tree.topic_ids()
         unit_ids = tree.unit_ids()
         concept_ids = tree.concept_ids()
-        topic_panel, cell_q = self._panel(tree, infos, leaves, recurrence, topic_ids, unit_ids, "topic", filtered=True)
-        concept_panel, _ = self._panel(tree, infos, leaves, recurrence, concept_ids, unit_ids, "concept", filtered=True)
-        unfiltered_panel, _ = self._panel(tree, infos, leaves, recurrence, topic_ids, unit_ids, "topic", filtered=False)
+        semantic_vectors = pretrained or backend
+        panel_args = dict(aligner=aligner, semantic_vectors=semantic_vectors,
+                          temperature=float(settings.alignment.semantic_temperature))
+        topic_panel, cell_q = self._panel(tree, infos, leaves, recurrence, topic_ids, unit_ids, "topic", filtered=True,
+                                          **panel_args)
+        concept_panel, _ = self._panel(tree, infos, leaves, recurrence, concept_ids, unit_ids, "concept", filtered=True,
+                                       **panel_args)
+        unfiltered_panel, _ = self._panel(tree, infos, leaves, recurrence, topic_ids, unit_ids, "topic", filtered=False,
+                                          **panel_args)
+        for panel in (topic_panel, concept_panel, unfiltered_panel):
+            panel.meta["semantic_source"] = getattr(backend, "name", "alignment")
 
         # 6. Backtest ---------------------------------------------------------------
-        self._progress(run_id, 0.38, "Backtesting candidate models on past exams")
-        engine = BacktestEngine(topic_panel, settings)
+        self._progress(run_id, 0.38, "Backtesting every component on past exams")
+        with self.app.db.session() as s:
+            general, general_info = general_model_for(s, course_id)
+        engine = BacktestEngine(topic_panel, settings, general=general)
         report = engine.run()
         self._progress(run_id, 0.55, "Backtesting the concept layer")
-        concept_report = BacktestEngine(concept_panel, settings).run(audit_leakage=False)
-        unf_report = BacktestEngine(unfiltered_panel, settings).run(audit_leakage=False)
+        concept_report = BacktestEngine(concept_panel, settings, general=general).run(audit_leakage=False,
+                                                                                     calibrate_scores=False)
+        unf_report = BacktestEngine(unfiltered_panel, settings, general=general).run(audit_leakage=False,
+                                                                                   calibrate_scores=False)
 
-        # 7. Ablation -----------------------------------------------------------------
-        self._progress(run_id, 0.65, "Running the ablation study")
-        lr = report.models.get("logistic")
-        ablation = run_ablation(topic_panel, settings, engine.store, report.targets, report.k, report.primary,
-                                bool(lr and lr.enabled), lr.gate_reason if lr else "logistic model not configured")
+        # 7. Evidence, uncertainty, ablation ---------------------------------------------
+        self._progress(run_id, 0.62, "Measuring evidence, uncertainty and the ablation study")
+        profile = build_profile(topic_panel, questions=sum(1 for q in leaves if q.counted), questions_total=len(leaves),
+                                questions_with_marks=sum(1 for q in leaves if q.marks),
+                                syllabus_weights=syllabus_share(topic_panel)[1], pretrained=pretrained is not None,
+                                pretrained_note=pretrained_note, repository_courses=general_info["real_courses"],
+                                report=report)
+        status_rows = component_status(report, profile)
+        component_status(concept_report, profile)
+        mode, mode_message = low_data_message(profile, report)
+        uncertainty = topic_uncertainty(topic_panel, settings, report, engine.models, general=general,
+                                        seed=int(settings.models.random_seed))
+        col_of_topic = {tid: i for i, tid in enumerate(topic_ids)}
+        q_exam = {q.id: q.exam_index for q in leaves}
+        q_topic = {q.id: col_of_topic.get(tree.topic_of(primary_node[q.id])) if primary_node[q.id] else None
+                   for q in leaves}
+        half_life = float(settings.temporal.default_half_life)
+        fam_k = max(5, report.k)
+
+        def recurrence_recall(preds: dict[int, np.ndarray]) -> dict[int, float]:
+            res = backtest_families(recurrence, q_exam, q_topic, preds, report.targets, fam_k, half_life)
+            return res.get("per_fold", {})
+
+        ablation = run_ablation(report, concept_report, recurrence_recall)
         filter_check = syllabus_filter_check(report.predictions.get(report.selected, {}),
                                              unf_report.predictions.get(report.selected, {}), topic_panel,
                                              unfiltered_panel, report.targets, report.k, report.primary,
@@ -260,25 +307,20 @@ class AnalysisService:
 
         # 8. Layer 2 ---------------------------------------------------------------------
         self._progress(run_id, 0.72, "Forecasting question formats and recurring questions")
-        col_of_topic = {tid: i for i, tid in enumerate(topic_ids)}
         fine_types: dict[int, Counter] = defaultdict(Counter)
         for q in leaves:
             for nid, _ in q.counted[:1]:
                 fine_types[tree.topic_of(nid)].update(q.types[:1])
         type_report = run_type_forecast(topic_panel, settings, report.targets, {k: dict(v) for k, v in fine_types.items()})
-        q_exam = {q.id: q.exam_index for q in leaves}
-        q_topic = {q.id: col_of_topic.get(tree.topic_of(primary_node[q.id])) if primary_node[q.id] else None
-                   for q in leaves}
-        half_life = float(settings.temporal.default_half_life)
-        fam_k = max(5, report.k)
         families_bt = backtest_families(recurrence, q_exam, q_topic, report.predictions[report.selected],
                                         report.targets, fam_k, half_life)
+        families_bt.pop("per_fold", None)
         family_preds = predict_families(recurrence, q_exam, q_topic, report.final_scores, topic_panel.T, half_life)
 
         # 9. Explanations -----------------------------------------------------------------
         self._progress(run_id, 0.8, "Explaining predictions")
         fm_final = engine.store.at(topic_panel.T)
-        explain_output = report.final_outputs.get("logistic") if lr and lr.enabled else None
+        explain_output = report.final_outputs.get("logistic") or report.final_outputs.get("general")
         mapping_conf = np.zeros(len(topic_ids))
         conf_lists: dict[int, list[float]] = defaultdict(list)
         for q in leaves:
@@ -299,12 +341,14 @@ class AnalysisService:
             rotation[r.item] = {"gaps": r.gaps, "cv": r.cv, "p_value": r.p_value, "period": r.period,
                                 "significant": r.significant}
         locations = {tid: _location(tree, tid) for tid in topic_ids}
+        semantic_evidence = self._semantic_evidence(tree, topic_ids, leaves, infos, semantic_vectors)
         preds = build_topic_predictions(topic_panel, report, fm_final, settings, explain_output=explain_output,
                                         mapping_confidence=mapping_conf, rotation=rotation,
                                         type_forecast=type_report.per_topic, syllabus_location=locations,
-                                        lab_items={t for t in topic_ids if _is_lab(tree, t)})
+                                        lab_items={t for t in topic_ids if _is_lab(tree, t)}, uncertainty=uncertainty,
+                                        semantic_evidence=semantic_evidence)
 
-        # Formulations for the topics worth revising first.
+        # Formulations for the topics worth revising first, each verified before it is kept.
         history_by_topic: dict[int, list[HistoricalQuestion]] = defaultdict(list)
         course_hist: list[HistoricalQuestion] = []
         for q in leaves:
@@ -314,11 +358,13 @@ class AnalysisService:
                 course_hist.append(hq)
             for nid, _ in q.counted[:1]:
                 history_by_topic[tree.topic_of(nid)].append(hq)
+        verifier = FormulationVerifier(tree, aligner, classifier, pretrained)
         formulations: dict[int, list[dict[str, Any]]] = {}
         wanted = [p for p in preds if p.category in CATEGORY_ORDER[:3]][:30] or preds[:10]
         for p in wanted:
             dist = type_report.per_topic.get(p.item_id, {}).get("distribution")
-            forms = generate_formulations(tree, p.item_id, history_by_topic.get(p.item_id, []), course_hist, dist, settings)
+            forms = generate_formulations(tree, p.item_id, history_by_topic.get(p.item_id, []), course_hist, dist,
+                                          settings, verifier=verifier)
             formulations[p.item_id] = [f.as_dict() for f in forms]
 
         # 10. Structure, coverage, charts, papers -------------------------------------------
@@ -341,7 +387,18 @@ class AnalysisService:
 
         # 11. Persist ------------------------------------------------------------------------
         self._progress(run_id, 0.95, "Saving results")
-        sufficiency = _sufficiency(report, topic_panel)
+        evidence = {"mode": mode, "message": mode_message, "profile": profile.as_dict(), "components": status_rows,
+                    "validation": report.validation, "general_model": general_info,
+                    "uncertainty": {"jackknife_replicates": uncertainty["jackknife_replicates"],
+                                    "posterior_draws": uncertainty["posterior_draws"],
+                                    "held_fixed": uncertainty["held_fixed"]},
+                    "ensemble": _ensemble_summary(report), "generation_checks": verifier.summary(),
+                    "synthetic_course": synthetic, "notes": profile.notes}
+        # Kept under its old key for older clients: the same evidence status, never "disabled".
+        sufficiency = {"exams": topic_panel.T, "folds": len(report.targets), "mode": mode, "message": mode_message,
+                       "models": [{"model": r["display"], "enabled": r["status"] != "UNAVAILABLE",
+                                   "status": r["status"], "reason": r["reason"]} for r in status_rows],
+                       "notes": report.notes}
         summary = {
             "exams": topic_panel.T, "questions": len(leaves), "topics": len(topic_ids), "concepts": len(concept_ids),
             "units": len(unit_ids), "k": report.k, "primary_metric": report.primary,
@@ -354,12 +411,14 @@ class AnalysisService:
             "status_counts": dict(Counter(q.status for q in leaves)),
             "counted_questions": sum(1 for q in leaves if q.counted),
             "leakage_audit": report.leakage_audit, "sufficiency": sufficiency,
+            "inference_mode": mode, "inference_message": mode_message, "validation": report.validation,
+            "engine_version": ENGINE_VERSION,
             "concept_layer": _layer_summary(concept_report),
             "type_forecast": {"method": type_report.method, "reason": type_report.reason},
             "families": families_bt, "seconds": round(time.time() - started, 2),
             "fingerprint": _fingerprint(leaves, topic_ids, settings),
             "settings_used": {"strictness": float(settings.alignment.strictness), "top_k": str(settings.models.top_k),
-                              "selection_rule": str(settings.models.selection_rule),
+                              "selection_rule": "evidence-aware ensemble unless a single method is reliably better",
                               "alignment_thresholds": th},
         }
         self._persist_results(run_id, settings, report, concept_report, preds, formulations, family_preds,
@@ -376,14 +435,15 @@ class AnalysisService:
                                   "excluded": {"groups": excluded},
                                   "rotation": {"items": [{"label": topic_panel.item_labels[k], **v}
                                                          for k, v in rotation.items()]},
-                                  "sufficiency": sufficiency,
+                                  "sufficiency": sufficiency, "evidence": evidence,
                                   "models": {"table": report.summary_table(), "selected": report.selected,
                                              "reason": report.selection_reason, "k": report.k,
                                              "primary": report.primary, "targets": [infos[t].label for t in report.targets],
-                                             "leakage_audit": report.leakage_audit,
+                                             "leakage_audit": report.leakage_audit, "validation": report.validation,
                                              "concept_table": concept_report.summary_table()},
-                              })
-        log_event(log, "analysis_done", run_id=run_id, seconds=summary["seconds"], selected=report.selected)
+                              }, course_id=course_id, synthetic=synthetic, settings_snapshot=settings)
+        log_event(log, "analysis_done", run_id=run_id, seconds=summary["seconds"], selected=report.selected,
+                  mode=mode)
         return summary
 
     # ------------------------------------------------------------- helpers
@@ -394,8 +454,15 @@ class AnalysisService:
             return out
         for label, htree in historical:
             from ..embeddings.backends import TfidfBackend
+            from ..embeddings.pretrained import HybridBackend
 
-            hb = backend if backend.kind == "neural" else TfidfBackend(settings)
+            # A fresh backend per historical syllabus: the aligner fits TF-IDF on the syllabus it is given.
+            if backend.kind == "neural":
+                hb = backend
+            elif backend.kind == "hybrid":
+                hb = HybridBackend(settings, backend.pretrained)
+            else:
+                hb = TfidfBackend(settings)
             res = SyllabusAligner(settings, htree, hb).align([QuestionItem(q.id, q.text, q.context) for q in weak],
                                                               feedback=False)
             for q, r in zip(weak, res):
@@ -442,20 +509,25 @@ class AnalysisService:
                     row.type_scores = scores
 
     def _panel(self, tree: TopicTree, infos: list[ExamInfo], leaves: list[Leaf], recurrence, item_ids: list[int],
-               unit_ids: list[int], layer: str, filtered: bool) -> tuple[Panel, dict[tuple[int, int], list[int]]]:
+               unit_ids: list[int], layer: str, filtered: bool, aligner: SyllabusAligner | None = None,
+               semantic_vectors=None, temperature: float = 0.05
+               ) -> tuple[Panel, dict[tuple[int, int], list[int]]]:
         col = {nid: i for i, nid in enumerate(item_ids)}
         unit_col = {u: i for i, u in enumerate(unit_ids)}
+        K = len(item_ids)
 
         def to_col(nid: int) -> int | None:
             if layer == "topic":
                 return col.get(tree.topic_of(nid))
             if layer == "concept":
-                if nid in col:
-                    return col[nid]
-                # A question mapped to a non-leaf node counts for its first concept-level descendant set? No:
-                # only exact concept matches count, the node itself is not a concept.
-                return None
+                # Only exact concept matches count; a question mapped to a parent node is not a concept.
+                return col.get(nid)
             return col.get(tree.unit_of(nid))
+
+        # Map every mappable node the aligner scored to this layer's columns (for semantic soft counts).
+        node_col = None
+        if aligner is not None and aligner.node_ids:
+            node_col = np.array([c if (c := to_col(n)) is not None else -1 for n in aligner.node_ids], dtype=int)
 
         records, cells = [], defaultdict(list)
         for q in leaves:
@@ -474,18 +546,40 @@ class AnalysisService:
                     c = to_col(m.topic_id)
                     if c is not None:
                         soft[c] = max(soft.get(c, 0.0), m.score)
+            semantic = _semantic_mass(q, items, node_col, K, temperature) if (items or not filtered) else {}
             for c in items:
                 cells[(q.exam_index, c)].append(q.id)
             records.append(QuestionRecord(q.id, q.exam_index, q.text, q.marks, q.format, q.types, list(items.items()),
-                                          status=q.status, soft=soft,
+                                          status=q.status, soft=soft, semantic=semantic,
                                           exact_repeat=bool(recurrence.exact_prev.get(q.id)),
                                           para_repeat=bool(recurrence.para_prev.get(q.id))))
         labels = [tree.nodes[i].label() for i in item_ids]
         item_unit = np.array([unit_col.get(tree.unit_of(i), 0) for i in item_ids], dtype=int)
         static = _static_features(tree, item_ids, unit_ids)
         panel = build_panel(infos, item_ids, labels, records, static=static, item_unit=item_unit, unit_ids=unit_ids,
-                            layer=layer)
+                            layer=layer, item_sim=_item_similarity(tree, item_ids, semantic_vectors),
+                            format_prior=_format_prior(tree, item_ids))
         return panel, dict(cells)
+
+    def _semantic_evidence(self, tree: TopicTree, topic_ids: list[int], leaves: list[Leaf], infos: list[ExamInfo],
+                           vectors, per_topic: int = 3) -> dict[int, list[dict[str, Any]]]:
+        """For each topic, the most similar past in-syllabus questions (semantic evidence for the explanation)."""
+        counted = [q for q in leaves if q.counted]
+        if vectors is None or not counted or not topic_ids:
+            return {}
+        try:
+            qv = vectors.encode([q.text or q.context for q in counted])
+            tv = vectors.encode([tree.document(t) for t in topic_ids])
+        except Exception:  # pragma: no cover - semantic evidence is optional
+            return {}
+        sims = tv @ qv.T
+        out: dict[int, list[dict[str, Any]]] = {}
+        for i, tid in enumerate(topic_ids):
+            order = np.argsort(-sims[i])[:per_topic]
+            out[tid] = [{"question_id": counted[j].id, "exam": infos[counted[j].exam_index].label,
+                         "text": counted[j].text[:300], "similarity": round(float(sims[i, j]), 3),
+                         "mapped_here": any(tree.topic_of(n) == tid for n, _ in counted[j].counted)} for j in order]
+        return out
 
     def _exam_summaries(self, snapshot, infos, leaves, tree, col_of_topic, unit_ids) -> list[ExamSummary]:
         leaf_by_id = {q.id: q for q in leaves}
@@ -532,8 +626,10 @@ class AnalysisService:
 
     def _persist_results(self, run_id, settings, report: BacktestReport, concept_report: BacktestReport, preds,
                          formulations, family_preds, concept_panel: Panel, tree, recurrence, infos,
-                         artifacts: dict[str, Any]) -> None:
+                         artifacts: dict[str, Any], *, course_id: int, synthetic: bool, settings_snapshot=None) -> None:
         with self.app.db.session() as s:
+            run = s.get(AnalysisRun, run_id)
+            run.engine_version = ENGINE_VERSION
             for layer, rep in (("topic", report), ("concept", concept_report)):
                 for name, mr in rep.models.items():
                     if mr.hidden:
@@ -541,7 +637,14 @@ class AnalysisService:
                     s.add(ModelResult(run_id=run_id, layer=layer, model_name=name, display_name=mr.display,
                                       family=mr.family, complexity=mr.complexity, enabled=mr.enabled,
                                       gate_reason=mr.gate_reason, selected=name == rep.selected,
-                                      metrics=_clean(mr.mean), metric_se=_clean(mr.se), notes=" ".join(mr.notes)))
+                                      metrics=_clean(mr.mean), metric_se=_clean(mr.se), notes=" ".join(mr.notes),
+                                      role=mr.role, scope=mr.scope, status=mr.status, weight=mr.weight,
+                                      reliability=None if mr.reliability is None else float(mr.reliability),
+                                      evidence=_jsonable({"status_reason": mr.status_reason, "df": mr.df,
+                                                          "skill": mr.skill, "sd": _clean(mr.sd), "ci95": mr.ci95,
+                                                          "fallback_folds": mr.fallback_folds,
+                                                          "unavailable_folds": mr.unavailable_folds,
+                                                          "final": _public_info(mr.final_info)})))
                     if layer == "topic":
                         for t, fm in mr.fold_metrics.items():
                             s.add(BacktestFold(run_id=run_id, layer=layer, model_name=name,
@@ -553,15 +656,17 @@ class AnalysisService:
                     rank=p.rank, score=p.score, probability=p.probability, prob_low=p.prob_low, prob_high=p.prob_high,
                     calibrated=p.calibrated, category=p.category, confidence=p.confidence,
                     features={"facts": _jsonable(p.facts), "signals_for": p.signals_for,
-                              "relative_score": p.relative_score},
+                              "relative_score": p.relative_score,
+                              "signal_contributions": {"values": p.signal_contributions, "source": p.signal_source}},
                     contributions={"values": p.contributions, "source": p.contribution_source},
-                    evidence={"lines": p.evidence}, why_not=p.why_not))
+                    evidence={"lines": p.evidence}, why_not=p.why_not, evidence_strength=p.evidence_strength,
+                    uncertainty=_jsonable(p.uncertainty)))
                 for f in formulations.get(p.item_id, []):
                     s.add(PredictedQuestion(run_id=run_id, topic_id=p.item_id, text=f["text"],
                                             question_type=f["format"], marks_low=f["marks_low"],
                                             marks_high=f["marks_high"], basis=f["basis"], rank=f["rank"],
                                             evidence_question_ids=f["evidence_question_ids"],
-                                            grounding={**f["grounding"], "note": f["note"], "label": f["label"]}))
+                                            grounding=_jsonable({**f["grounding"], "note": f["note"], "label": f["label"]})))
             scores = concept_report.final_scores
             order = np.lexsort((np.arange(len(scores)), -scores))
             for rank, i in enumerate(order, start=1):
@@ -579,6 +684,18 @@ class AnalysisService:
                                            "exams": [infos[e].label for e in fam["exam_indices"]]}))
             for key, data in artifacts.items():
                 s.add(AnalysisArtifact(run_id=run_id, key=key, data=_jsonable(data)))
+            # Repository: the course's scale-free rows (for other courses' general model; synthetic courses
+            # are stored flagged and never used) and the course-specific model's parameters.
+            if report.ctx is not None and settings_snapshot is not None:
+                X, y, _ = panel_rows(report.ctx.panel, settings_snapshot)
+                save_course_features(s, course_id, run_id, "topic", X, y, report.ctx.panel.T, synthetic)
+            lr = report.final_outputs.get("logistic")
+            if lr is not None:
+                register_course_model(s, course_id, run_id, "logistic",
+                                      {"coefficients": lr.info.get("coefficients"), "intercept": lr.info.get("intercept"),
+                                       "prior_precision": lr.info.get("prior_precision")},
+                                      {"train_rows": lr.info.get("train_rows"), "train_exams": lr.info.get("train_exams"),
+                                       "shift_from_general": lr.info.get("shift_from_general")})
 
 
 # ---------------------------------------------------------------------- utilities
@@ -653,19 +770,81 @@ def _location(tree: TopicTree, nid: int) -> str:
     return path
 
 
-def _sufficiency(report: BacktestReport, panel: Panel) -> dict[str, Any]:
-    rows = []
-    for mr in report.models.values():
-        if mr.hidden:
+def _semantic_mass(q: Leaf, items: dict[int, float], node_col: np.ndarray | None, K: int,
+                   temperature: float) -> dict[int, float]:
+    """Spread one unit of evidence of an in-syllabus question over the layer's items by similarity."""
+    r = q.alignment
+    if r is None or r.score_vector is None or node_col is None or K == 0:
+        return {c: 1.0 / len(items) for c in items} if items else {}
+    best = np.full(K, -np.inf)
+    valid = node_col >= 0
+    if not valid.any():
+        return {c: 1.0 / len(items) for c in items} if items else {}
+    np.maximum.at(best, node_col[valid], r.score_vector[valid].astype(float))
+    cols = np.flatnonzero(np.isfinite(best))
+    z = (best[cols] - best[cols].max()) / max(temperature, 1e-6)
+    p = np.exp(z)
+    p /= p.sum()
+    keep = {int(c): float(x) for c, x in zip(cols, p) if x >= 0.01}
+    total = sum(keep.values()) or 1.0
+    return {c: x / total for c, x in keep.items()}
+
+
+def _item_similarity(tree: TopicTree, item_ids: list[int], vectors) -> np.ndarray | None:
+    """Syllabus-only similarity between items, re-centred so unrelated items score about 0."""
+    if vectors is None or len(item_ids) < 2:
+        return None
+    try:
+        V = np.asarray(vectors.encode([tree.document(i) for i in item_ids]), dtype=float)
+    except Exception:  # pragma: no cover - similarity is optional
+        return None
+    n = np.linalg.norm(V, axis=1, keepdims=True)
+    V = V / np.where(n == 0, 1.0, n)
+    S = V @ V.T
+    off = S[~np.eye(len(item_ids), dtype=bool)]
+    S = np.clip(S - float(np.median(off)), 0.0, None)
+    np.fill_diagonal(S, 0.0)
+    return S
+
+
+def _format_prior(tree: TopicTree, item_ids: list[int]) -> np.ndarray | None:
+    """Question formats suggested by syllabus tags (numerical, derivation, ...) of each item's subtree."""
+    F = np.zeros((len(item_ids), len(FORMATS)))
+    for k, nid in enumerate(item_ids):
+        kinds = set(tree.nodes[nid].kinds)
+        for d in tree.descendants(nid):
+            kinds |= set(tree.nodes[d].kinds)
+        for kind in kinds:
+            f = KIND_FORMATS.get(kind)
+            if f:
+                F[k, FORMATS.index(f)] = 1.0
+    return F if F.any() else None
+
+
+def _public_info(info: dict[str, Any]) -> dict[str, Any]:
+    """Final-forecast info of a model without large or non-JSON objects."""
+    out = {}
+    for k, v in (info or {}).items():
+        if k in ("posterior", "coefficients", "summary", "displays"):
             continue
-        rows.append({"model": mr.display, "enabled": mr.enabled, "reason": mr.gate_reason or "Enabled."})
-    mode = "advanced" if any(r["enabled"] for r in rows if r["model"] in ("Logistic regression",)) else "statistical"
-    msg = None
-    if mode == "statistical":
-        msg = ("Advanced ML disabled because the historical sample is too small for reliable training. "
-               "The ranking uses transparent statistical models.")
-    return {"exams": panel.T, "folds": len(report.targets), "mode": mode, "message": msg, "models": rows,
-            "notes": report.notes}
+        out[k] = v
+    return out
+
+
+def _ensemble_summary(report: BacktestReport) -> dict[str, Any]:
+    out = report.final_outputs.get("ensemble")
+    if out is None:
+        return {}
+    info = out.info
+    displays = info.get("displays", {})
+    rows = [{"model": m, "display": displays.get(m, m), "weight": w, "reliability": info.get("reliability", {}).get(m),
+             "skill": info.get("skill", {}).get(m), "raw_gain": info.get("raw_gain", {}).get(m),
+             "folds": info.get("skill_folds", {}).get(m)} for m, w in sorted(info.get("weights", {}).items(),
+                                                                            key=lambda kv: -kv[1])]
+    return {"members": rows, "excluded": [{"model": m, "display": displays.get(m, m), "reason": r}
+                                          for m, r in info.get("excluded", {}).items()],
+            "exams": info.get("exams"), "weight_folds": info.get("weight_folds"),
+            "is_final": report.selected == "ensemble"}
 
 
 def _layer_summary(rep: BacktestReport) -> dict[str, Any]:

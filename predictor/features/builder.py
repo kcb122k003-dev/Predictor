@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from ..config.settings import Settings
+from ..inference.bayes import fit_recurrence
 from ..temporal import dynamics as dyn
 from ..temporal.panel import FORMATS, Panel
 
@@ -21,7 +22,9 @@ FEATURE_GROUPS: dict[str, list[str]] = {
     "recency": ["last1", "freq_last3", "freq_last5", "ewma_short", "ewma_long", "linear_decay"],
     "temporal": ["since_last", "never_seen", "streak_present", "streak_absent", "mean_gap", "gap_cv",
                  "due_z", "hazard", "markov_next", "trend"],
-    "semantic": ["soft_ewma", "soft_mean"],
+    "semantic": ["soft_ewma", "soft_mean", "sem_ewma", "sem_neighbors"],
+    "bayesian": ["bayes_mean", "bayes_width"],
+    "history": ["hist_log", "base_rate"],
     "marks": ["marks_share", "marks_share_recent", "high_mark_rate"],
     "question_type": ["numerical_share", "derivation_share", "theory_share", "type_entropy"],
     "cooccurrence": ["cooc_lift_last", "unit_ewma"],
@@ -34,7 +37,15 @@ GROUP_LABELS = {
     "frequency": "Historical frequency", "recency": "Recency", "temporal": "Recurrence dynamics",
     "semantic": "Semantic similarity", "marks": "Marks weight", "question_type": "Question type",
     "cooccurrence": "Topic co-occurrence", "syllabus": "Syllabus weight", "recurrence": "Question recurrence",
+    "bayesian": "Bayesian recurrence", "history": "History length",
 }
+# Scale-free features that mean the same thing in every course. The general ranking model is
+# trained on these (simulated sequences plus other real courses) and the course-specific model
+# is pulled toward its weights. Text, marks and syllabus features are course-specific.
+GENERIC_FEATURES = ["freq_all", "last1", "freq_last3", "ewma_short", "ewma_long", "linear_decay", "since_last",
+                    "never_seen", "streak_present", "streak_absent", "mean_gap", "gap_cv", "due_z", "hazard",
+                    "markov_next", "trend", "cooc_lift_last", "unit_ewma", "bayes_mean", "bayes_width", "hist_log",
+                    "base_rate"]
 
 
 @dataclass
@@ -42,7 +53,7 @@ class FeatureMatrix:
     names: list[str]
     X: np.ndarray  # (K, F)
     n_history: int
-    extras: dict[str, np.ndarray] = field(default_factory=dict)
+    extras: dict = field(default_factory=dict)
 
     def column(self, name: str) -> np.ndarray:
         return self.X[:, self.names.index(name)]
@@ -59,16 +70,20 @@ def compute_features(history: Panel, settings: Settings) -> FeatureMatrix:
     short_h, long_h = half_lives[min(1, len(half_lives) - 1)], half_lives[-1]
     f: dict[str, np.ndarray] = {}
 
+    post = fit_recurrence(Y, history.item_unit if history.item_unit is not None and len(history.item_unit) == K
+                          else None)
     if T == 0:
         X = np.zeros((K, len(FEATURE_NAMES)))
         names = list(FEATURE_NAMES)
         X[:, names.index("never_seen")] = 1.0
         X[:, names.index("gap_cv")] = 1.0
         X[:, names.index("hazard")] = 0.0
+        X[:, names.index("bayes_mean")] = post.mean
+        X[:, names.index("bayes_width")] = post.high - post.low
         static = _static_features(history, K)
         for name, values in static.items():
             X[:, names.index(name)] = values
-        return FeatureMatrix(names, X, 0)
+        return FeatureMatrix(names, X, 0, {"posterior": post})
 
     counts = Y.sum(axis=0)
     f["freq_all"] = counts / T
@@ -107,6 +122,19 @@ def compute_features(history: Panel, settings: Settings) -> FeatureMatrix:
 
     f["soft_ewma"] = dyn.ewma(history.soft, long_h)
     f["soft_mean"] = history.soft.mean(axis=0)
+    sem = history.semantic_matrix()
+    f["sem_ewma"] = dyn.ewma(sem, long_h)
+    if history.item_sim is not None and history.item_sim.shape == (K, K):
+        S = np.clip(history.item_sim, 0.0, None).copy()
+        np.fill_diagonal(S, 0.0)
+        rows = S.sum(axis=1)
+        f["sem_neighbors"] = np.where(rows > 0, (S @ f["ewma_short"]) / np.maximum(rows, 1e-9), 0.0)
+    else:
+        f["sem_neighbors"] = np.zeros(K)
+    f["bayes_mean"] = post.mean
+    f["bayes_width"] = post.high - post.low
+    f["hist_log"] = np.full(K, np.log1p(T))
+    f["base_rate"] = np.full(K, float(Y.mean()))
 
     total = history.total_marks()[:, None]
     share = history.marks / total
@@ -150,7 +178,7 @@ def compute_features(history: Panel, settings: Settings) -> FeatureMatrix:
     f.update(_static_features(history, K))
     X = np.column_stack([np.nan_to_num(f[name], nan=0.0, posinf=0.0, neginf=0.0) for name in FEATURE_NAMES])
     extras = {"since_last_raw": since, "counts": counts, "mean_gap_raw": mg, "std_gap_raw": sd,
-              "n_gaps": n_gaps, "hazard_table_base": np.array([haz.base_rate])}
+              "n_gaps": n_gaps, "hazard_table_base": np.array([haz.base_rate]), "posterior": post}
     return FeatureMatrix(list(FEATURE_NAMES), X, T, extras)
 
 

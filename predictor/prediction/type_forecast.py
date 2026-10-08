@@ -95,10 +95,9 @@ class TypeForecastReport:
 def run_type_forecast(panel: Panel, settings: Settings, targets: list[int],
                       fine_types: dict[int, dict[str, int]] | None = None) -> TypeForecastReport:
     half_life = float(settings.temporal.default_half_life)
-    min_tr = int(settings.models.sufficiency.min_exams_type_transition)
-    methods = [m for m in METHODS if m != "transition" or panel.T >= min_tr]
-    gated = {} if "transition" in methods else {
-        "transition": f"Needs at least {min_tr} exams to estimate format transitions (have {panel.T})."}
+    # All three methods always compete; with few papers the simplest one within one standard error wins.
+    methods = list(METHODS)
+    gated: dict[str, str] = {}
     folds: dict[str, dict[int, float]] = {m: {} for m in methods}
     for t in targets:
         hist = panel.formats[:t]

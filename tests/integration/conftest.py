@@ -24,7 +24,7 @@ def analysed_demo(tmp_path_factory, demo_files):
     folder, truth = demo_files
     app = AppContext.create(tmp_path_factory.mktemp("data"), log=False)
     ingest = IngestService(app)
-    cid = CourseService(app).create("Fluid Mechanics demo")
+    cid = CourseService(app).create("Fluid Mechanics demo", is_synthetic=True)
     outcomes = {}
     for kind, sub in (("syllabus", "syllabus"), ("exam", "exams")):
         for path in sorted((folder / sub).iterdir()):

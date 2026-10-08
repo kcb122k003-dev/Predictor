@@ -27,6 +27,18 @@ class SettingsError(ValueError):
     """Raised when an override does not match the default schema."""
 
 
+# Settings removed in later versions. Old settings.json files and course overrides may still
+# contain them; they are ignored instead of rejected so existing installations keep working.
+DEPRECATED_KEYS = frozenset({
+    "models.sufficiency",  # binary data-size gates, replaced by evidence-aware weighting
+    "calibration.min_rows", "calibration.min_positives",  # replaced by a nested significance check
+})
+
+
+def _deprecated(dotted: str) -> bool:
+    return any(dotted == k or dotted.startswith(k + ".") for k in DEPRECATED_KEYS)
+
+
 def _load_defaults() -> dict[str, Any]:
     with DEFAULTS_PATH.open("rb") as fh:
         return tomllib.load(fh)
@@ -57,6 +69,8 @@ def deep_merge(base: dict[str, Any], overrides: Mapping[str, Any], *, path: str 
     out = copy.deepcopy(base)
     for key, value in overrides.items():
         dotted = f"{path}.{key}" if path else key
+        if key not in out and _deprecated(dotted):
+            continue
         if key not in out:
             if strict:
                 raise SettingsError(f"Unknown setting '{dotted}'")

@@ -26,6 +26,7 @@ dependencies = [
     "reportlab>=4.0",
     "openpyxl>=3.1",
     "plotly>=5.18",
+    "wordllama>=0.3",
     "tomli>=2.0; python_version < '3.11'",
 ]
 
@@ -48,7 +49,7 @@ predictor = "predictor.cli:main"
 include = ["predictor*"]
 
 [tool.setuptools.package-data]
-predictor = ["config/*.toml", "config/*.json", "config/*.txt", "ui/static/*", "ui/static/js/*"]
+predictor = ["config/*.toml", "config/*.json", "config/*.txt", "inference/*.json", "ui/static/*", "ui/static/js/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

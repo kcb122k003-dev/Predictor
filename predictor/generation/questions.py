@@ -200,7 +200,7 @@ def _marks_range(history: list[HistoricalQuestion], fmt: str, course: list[Histo
 
 def generate_formulations(tree: TopicTree, topic_id: int, topic_history: list[HistoricalQuestion],
                           course_history: list[HistoricalQuestion], format_forecast: dict[str, float] | None,
-                          settings: Settings, limit: int | None = None) -> list[Formulation]:
+                          settings: Settings, limit: int | None = None, verifier=None) -> list[Formulation]:
     limit = limit or int(settings.generation.formulations_per_topic)
     instruction = list(settings.alignment.instruction_words)
     openers = harvest_openers(course_history)
@@ -284,6 +284,11 @@ def generate_formulations(tree: TopicTree, topic_id: int, topic_history: list[Hi
         grounding = check_grounding(text, allowed, instruction)
         if not grounding["grounded"]:
             continue
+        if verifier is not None:
+            checks = verifier.check(text, topic_id, fmt, basis)
+            grounding["checks"] = checks
+            if not checks["passed"]:
+                continue
         lo, hi = _marks_range(topic_history, fmt, course_history)
         out.append(Formulation(text=text, format=fmt, marks_low=lo, marks_high=hi, basis=basis,
                                evidence_question_ids=evidence, grounding=grounding, note=note, rank=len(out) + 1))

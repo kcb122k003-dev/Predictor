@@ -84,9 +84,16 @@ max_concept_words = 9
 merge_title_ratio = 86
 
 [embeddings]
-# auto | tfidf | sentence-transformers
-# "auto" uses sentence-transformers only if the model is already on disk; otherwise TF-IDF.
+# auto | hybrid | tfidf | sentence-transformers
+# "auto" uses sentence-transformers if that model is already on disk, otherwise the hybrid of
+# the bundled pretrained model (WordLlama) and syllabus-fitted TF-IDF, otherwise TF-IDF alone.
 backend = "auto"
+# Pretrained general-language model used at every dataset size for question similarity,
+# semantic evidence and generated-question checks. "wordllama" ships inside the pip package
+# (no download); "none" turns the pretrained layer off.
+pretrained = "wordllama"
+# Share of the pretrained similarity in the hybrid alignment score (the rest is TF-IDF).
+hybrid_pretrained_weight = 0.3
 model_name = "BAAI/bge-small-en-v1.5"
 # Empty means <data_dir>/models
 model_dir = ""
@@ -103,6 +110,9 @@ keyword_weight = 0.4
 # A second topic is also assigned when its score is at least this fraction of the best.
 multi_topic_ratio = 0.88
 max_topics_per_question = 2
+# Semantic soft evidence: each in-syllabus question spreads one unit of evidence over topics
+# with weights softmax(alignment score / semantic_temperature). Smaller = sharper.
+semantic_temperature = 0.05
 # Laboratory nodes compete with theory topics ("Determination of metacentric height").
 # Their score is multiplied by this unless the question mentions experiments or apparatus.
 lab_penalty = 0.6
@@ -119,6 +129,11 @@ strictness = 0.5
 instruction_words = ["derive", "derivation", "explain", "define", "definition", "describe", "discuss", "calculate", "compute", "determine", "find", "obtain", "show", "prove", "state", "write", "short", "note", "notes", "brief", "briefly", "neat", "sketch", "diagram", "figure", "suitable", "example", "examples", "mark", "marks", "what", "how", "why", "when", "which", "give", "list", "differentiate", "distinguish", "compare", "comparison", "difference", "between", "mean", "meant", "illustrate", "elaborate", "evaluate", "estimate", "draw", "following", "also", "using", "use", "help", "necessary", "assume", "data", "value", "values", "term", "terms", "expression", "relation", "relationship", "significance", "importance", "important", "various", "type", "types", "applications", "application", "advantage", "advantages", "disadvantage", "disadvantages", "answer", "question", "questions", "attempt", "any", "all", "given", "figure", "fig", "case", "cases", "detail", "details", "clearly", "properly"]
 
 [alignment.thresholds.tfidf]
+clearly_in = 0.34
+probably_in = 0.22
+outside = 0.12
+
+[alignment.thresholds.hybrid]
 clearly_in = 0.34
 probably_in = 0.22
 outside = 0.12
@@ -151,16 +166,20 @@ windows = [1, 2, 3, 5]
 rotation_min_gaps = 3
 rotation_p_value = 0.10
 rotation_permutations = 2000
+# Recency discounts tried by the hierarchical Bayesian recurrence (plus "no decay"), chosen on
+# earlier papers.
+bayes_half_lives = [6.0, 3.0, 1.5]
 # Pseudo-observations used to shrink a gap-specific hazard toward the pooled rate.
 hazard_prior_strength = 3.0
 # Pseudo-exams used to shrink a topic's rate toward the pooled rate.
 rate_prior_strength = 2.0
 
 [models]
-# Exams before the first backtest target.
-min_train_exams = 3
-# Exams before a training row is created for learned models.
-min_history = 2
+# Exams before the first backtest target. 1 = every paper after the first is a held-out fold
+# (rolling origin over all folds). There is no minimum number of papers for any model.
+min_train_exams = 1
+# Exams of history before a training row is created for learned models.
+min_history = 1
 # ndcg | recall | precision | hit_rate | mrr
 primary_metric = "ndcg"
 # "auto" = median distinct topics per past exam, bounded by top_k_min/top_k_max.
@@ -171,30 +190,41 @@ top_k_max = 15
 selection_rule = "one_se"
 random_seed = 13
 logistic_C = 0.5
+# Prior precision of the course-specific logistic model around the general model's weights
+# (per standardised coefficient). Larger = stays closer to the general model.
+course_prior_precision = 2.0
 ensemble_max_members = 3
-forest_trees = 300
+forest_trees = 60
 forest_min_leaf = 5
-gbm_max_iter = 150
+gbm_max_iter = 100
 gbm_learning_rate = 0.05
 gbm_max_depth = 3
 hmm_iterations = 60
-enabled = ["random", "frequency", "last_exam", "window", "ewma", "linear_decay", "freq_recency", "beta_binomial", "markov", "hazard", "semantic", "logistic", "random_forest", "gradient_boosting", "hmm", "ensemble"]
+# Baselines (random ... freq_recency) are kept for comparison. The rest are components of the
+# evidence-aware ensemble ("ensemble"), which produces the final ranking.
+enabled = ["random", "frequency", "last_exam", "window", "ewma", "linear_decay", "freq_recency", "recency", "beta_binomial", "semantic", "coverage", "question_type", "cooccurrence", "hazard", "markov", "hmm", "general", "logistic", "gradient_boosting", "random_forest", "ensemble"]
 
-[models.sufficiency]
-min_exams_backtest = 4
-min_exams_logistic = 7
-min_positive_rows_logistic = 30
-min_exams_trees = 10
-min_rows_trees = 400
-min_exams_hmm = 12
-min_exams_hazard = 6
-min_exams_type_transition = 6
-# Below this many exams the report states that predictions are highly uncertain.
-low_confidence_exams = 6
+[ensemble]
+# Weight of component m: reliability * exp(skill_temperature * skill), where reliability is
+# exams / (exams + parameters estimated from this course) and skill is the component's gain
+# over the average member on earlier papers in units of the fold spread, shrunk by
+# folds / (folds + skill_prior_folds).
+skill_temperature = 2.0
+skill_prior_folds = 3.0
+min_metric_sd = 0.05
+# Topics with little history of their own lean on pretrained, syllabus and cross-course
+# components by up to (1 + gate_strength).
+gate_strength = 1.0
+# The ensemble is the final ranking unless a single method beat it on the backtest by more
+# than this many standard errors of the paired difference.
+replace_if_worse_by_se = 1.0
 
 [calibration]
-min_rows = 80
-min_positives = 15
+# Probabilities are shown only when calibration fitted on earlier papers beat the base rate on
+# later papers (nested Brier score) by more than one standard error across papers. There is no
+# fixed row count: with few papers the standard error is large and scores stay relative.
+# Platt scaling and isotonic regression are compared by nested log loss.
+methods = ["platt", "isotonic"]
 bootstrap_samples = 200
 band_low = 0.10
 band_high = 0.90

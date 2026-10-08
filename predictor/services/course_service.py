@@ -16,12 +16,13 @@ class CourseService:
     def __init__(self, app: AppContext):
         self.app = app
 
-    def create(self, name: str, code: str = "", description: str = "") -> int:
+    def create(self, name: str, code: str = "", description: str = "", *, is_synthetic: bool = False) -> int:
         name = (name or "").strip()
         if not name:
             raise ValueError("A course needs a name.")
         with self.app.db.session() as s:
-            course = Course(name=name[:200], code=code.strip()[:60], description=description.strip())
+            course = Course(name=name[:200], code=code.strip()[:60], description=description.strip(),
+                            is_synthetic=bool(is_synthetic))
             s.add(course)
             s.flush()
             return course.id
@@ -49,6 +50,7 @@ class CourseService:
         return {
             "id": c.id, "name": c.name, "code": c.code, "description": c.description,
             "created_at": c.created_at.isoformat() if c.created_at else None, "settings": c.settings or {},
+            "is_synthetic": bool(c.is_synthetic),
             "exam_files": count(SourceFile, SourceFile.course_id == c.id, SourceFile.kind == "exam"),
             "syllabus_files": count(SourceFile, SourceFile.course_id == c.id, SourceFile.kind == "syllabus"),
             "exams": count(Exam, Exam.course_id == c.id),

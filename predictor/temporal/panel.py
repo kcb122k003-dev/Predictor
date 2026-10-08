@@ -41,6 +41,7 @@ class QuestionRecord:
     topic_node: int | None = None
     status: str = "A"
     soft: dict[int, float] = field(default_factory=dict)  # item column -> similarity
+    semantic: dict[int, float] = field(default_factory=dict)  # item column -> share of this question (sums to 1)
     exact_repeat: bool = False
     para_repeat: bool = False
 
@@ -58,6 +59,11 @@ class Panel:
     exact_repeat: np.ndarray  # (T, K) questions that repeat an earlier question exactly
     para_repeat: np.ndarray  # (T, K) questions that paraphrase an earlier question
     static: dict[str, np.ndarray] = field(default_factory=dict)  # (K,) syllabus properties
+    # (T, K) semantic soft counts: each in-syllabus question spreads one unit of evidence over the
+    # topics by similarity (pretrained/hybrid alignment scores), so near-misses also count a little.
+    semantic: np.ndarray | None = None
+    item_sim: np.ndarray | None = None  # (K, K) syllabus-only similarity between items (no exam text)
+    format_prior: np.ndarray | None = None  # (K, F) format tendency from syllabus tags (no exam text)
     item_unit: np.ndarray | None = None  # (K,) unit column index per item (for unit features)
     unit_ids: list[int] = field(default_factory=list)
     layer: str = "topic"
@@ -80,8 +86,21 @@ class Panel:
             Y=self.Y[:t].copy(), marks=self.marks[:t].copy(), soft=self.soft[:t].copy(),
             formats=self.formats[:t].copy(), n_questions=self.n_questions[:t].copy(),
             exact_repeat=self.exact_repeat[:t].copy(), para_repeat=self.para_repeat[:t].copy(),
+            semantic=self.semantic_matrix()[:t].copy(),
             meta=dict(self.meta),
         )
+
+    def semantic_matrix(self) -> np.ndarray:
+        return self.semantic if self.semantic is not None else np.zeros_like(self.Y)
+
+    def drop_exam(self, j: int) -> "Panel":
+        """The panel without exam ``j`` (used for leave-one-exam-out uncertainty)."""
+        keep = [i for i in range(self.T) if i != j]
+        return replace(
+            self, exams=[self.exams[i] for i in keep], Y=self.Y[keep].copy(), marks=self.marks[keep].copy(),
+            soft=self.soft[keep].copy(), formats=self.formats[keep].copy(), n_questions=self.n_questions[keep].copy(),
+            exact_repeat=self.exact_repeat[keep].copy(), para_repeat=self.para_repeat[keep].copy(),
+            semantic=self.semantic_matrix()[keep].copy(), meta=dict(self.meta))
 
     def total_marks(self) -> np.ndarray:
         return np.array([max(e.total_marks, 1e-9) for e in self.exams], dtype=float)
@@ -93,7 +112,8 @@ class Panel:
 def build_panel(exams: list[ExamInfo], item_ids: list[int], item_labels: list[str],
                 questions: list[QuestionRecord], *, static: dict[str, np.ndarray] | None = None,
                 item_unit: np.ndarray | None = None, unit_ids: list[int] | None = None,
-                layer: str = "topic") -> Panel:
+                layer: str = "topic", item_sim: np.ndarray | None = None,
+                format_prior: np.ndarray | None = None) -> Panel:
     T, K, F = len(exams), len(item_ids), len(FORMATS)
     Y = np.zeros((T, K))
     marks = np.zeros((T, K))
@@ -102,6 +122,7 @@ def build_panel(exams: list[ExamInfo], item_ids: list[int], item_labels: list[st
     nq = np.zeros((T, K))
     exact = np.zeros((T, K))
     para = np.zeros((T, K))
+    semantic = np.zeros((T, K))
     f_index = {f: i for i, f in enumerate(FORMATS)}
     for q in questions:
         t = q.exam_index
@@ -110,6 +131,9 @@ def build_panel(exams: list[ExamInfo], item_ids: list[int], item_labels: list[st
         for col, sim in q.soft.items():
             if 0 <= col < K:
                 soft[t, col] = max(soft[t, col], sim)
+        for col, mass in q.semantic.items():
+            if 0 <= col < K:
+                semantic[t, col] += mass
         total_w = sum(w for _, w in q.items) or 1.0
         for col, w in q.items:
             if not (0 <= col < K):
@@ -125,4 +149,5 @@ def build_panel(exams: list[ExamInfo], item_ids: list[int], item_labels: list[st
                 para[t, col] += 1
     return Panel(exams=exams, item_ids=list(item_ids), item_labels=list(item_labels), Y=Y, marks=marks,
                  soft=soft, formats=formats, n_questions=nq, exact_repeat=exact, para_repeat=para,
-                 static=static or {}, item_unit=item_unit, unit_ids=unit_ids or [], layer=layer)
+                 static=static or {}, item_unit=item_unit, unit_ids=unit_ids or [], layer=layer, semantic=semantic,
+                 item_sim=item_sim, format_prior=format_prior)

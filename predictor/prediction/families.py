@@ -80,7 +80,7 @@ def backtest_families(recurrence: RecurrenceResult, q_exam: dict[int, int], q_to
     m_mean, m_se = mean_and_se(list(folds_model.values()))
     r_mean, r_se = mean_and_se(list(folds_recency.values()))
     return {
-        "k": k, "folds": len(folds_model),
+        "k": k, "folds": len(folds_model), "per_fold": dict(folds_model),
         "model": {"mean": _r(m_mean), "se": _r(m_se)},
         "recency_baseline": {"mean": _r(r_mean), "se": _r(r_se)},
         "note": ("Exact-question recall@K: of the questions in a held-out exam that repeated or paraphrased an "

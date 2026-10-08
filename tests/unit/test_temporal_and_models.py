@@ -80,7 +80,7 @@ def planted_panel():
 
 def test_backtest_beats_random_and_selects(settings, planted_panel):
     rep = BacktestEngine(planted_panel, settings).run()
-    assert rep.targets == list(range(3, 14))
+    assert rep.targets == list(range(1, 14))  # rolling origin over every fold
     rnd = rep.models["random"].mean["ndcg"]
     assert rep.models[rep.selected].mean["ndcg"] > rnd + 0.15
     assert rep.leakage_audit["passed"], rep.leakage_audit
@@ -89,25 +89,33 @@ def test_backtest_beats_random_and_selects(settings, planted_panel):
     assert not rep.models[rep.selected].hidden
 
 
-def test_small_data_disables_complex_models(settings):
+def test_small_data_keeps_every_component_running(settings):
     rng = np.random.default_rng(3)
     panel = make_panel((rng.random((5, 8)) < 0.5).astype(float))
     rep = BacktestEngine(panel, settings).run()
-    for name in ("logistic", "random_forest", "gradient_boosting", "hmm"):
-        assert not rep.models[name].enabled and rep.models[name].gate_reason
+    for name in ("logistic", "random_forest", "gradient_boosting", "hmm", "hazard", "semantic", "beta_binomial"):
+        assert rep.models[name].enabled and not rep.models[name].gate_reason
+        assert rep.models[name].fold_metrics, name
+    weights = rep.final_outputs["ensemble"].info["weights"]
+    rel = rep.final_outputs["ensemble"].info["reliability"]
+    # Course-learned models run but are downweighted by their reliability prior.
+    assert rel["logistic"] < rel["beta_binomial"] and rel["random_forest"] < rel["logistic"]
+    assert weights["random_forest"] < weights["beta_binomial"]
     tiny = make_panel((rng.random((3, 8)) < 0.5).astype(float))
     rep2 = BacktestEngine(tiny, settings).run()
-    assert rep2.targets == [] and rep2.selected == "beta_binomial"
-    assert any("Backtesting needs" in n for n in rep2.notes)
+    assert rep2.targets == [1, 2]
+    assert not any("needs at least" in n.lower() for n in rep2.notes)
 
 
 def test_one_se_rule_prefers_simpler(settings, planted_panel):
     rep = BacktestEngine(planted_panel, settings).run()
-    selected = rep.models[rep.selected]
-    best = rep.models[rep.best_by_mean]
-    assert selected.complexity <= best.complexity
+    name, best_name, _ = select_model(rep.models, "ndcg", "one_se", rep.targets)
+    assert rep.models[name].complexity <= rep.models[best_name].complexity
     name, best_name, reason = select_model(rep.models, "ndcg", "best", rep.targets)
     assert name == best_name and "highest mean" in reason
+    # The final model is the ensemble unless a single method is better by more than one standard error.
+    if rep.selected != "ensemble":
+        assert "more than one standard error" in rep.selection_reason
 
 
 def test_leakage_audit_catches_a_leaky_model(settings, planted_panel):

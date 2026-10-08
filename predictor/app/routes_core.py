@@ -127,7 +127,8 @@ def create_demo(request: Request) -> dict[str, Any]:
     app = ctx(request)
     service = IngestService(app)
     cid = CourseService(app).create("Fluid Mechanics (synthetic demo)", "CE 501",
-                                    "Generated example data with planted patterns. Not real exams.")
+                                    "Generated example data with planted patterns. Not real exams.",
+                                    is_synthetic=True)
     with tempfile.TemporaryDirectory() as tmp:
         generate_demo(Path(tmp))
         for kind, folder in (("syllabus", "syllabus"), ("exam", "exams")):

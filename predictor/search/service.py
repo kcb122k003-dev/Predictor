@@ -9,7 +9,8 @@ import numpy as np
 from sqlalchemy import select, text
 
 from ..database.models import CourseTopic, Exam, ExamQuestion
-from ..embeddings.backends import TfidfBackend
+from ..embeddings.backends import TfidfBackend, get_pretrained
+from ..embeddings.pretrained import HybridBackend
 from ..services.context import AppContext
 from ..services.syllabus_store import current_version, to_tree, topics_of
 
@@ -48,7 +49,8 @@ class SearchService:
             leaves = s.execute(select(ExamQuestion, Exam).join(Exam).where(
                 Exam.course_id == course_id, ExamQuestion.is_leaf.is_(True))).all()
             if query and tree is not None and len(tree):
-                backend = TfidfBackend(settings)
+                pre, _ = get_pretrained(settings)
+                backend = HybridBackend(settings, pre) if pre is not None else TfidfBackend(settings)
                 backend.fit([tree.document(i) for i in tree.nodes] + [query])
                 qv = backend.encode([query])[0]
                 if leaves:

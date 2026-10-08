@@ -4,8 +4,11 @@
   grams, fitted on the syllabus text only. Character n-grams absorb OCR errors and word
   variants ("derive"/"derivation"). Fitting on the syllabus keeps exam text, including
   future exams during backtests, out of the representation.
-* ``SentenceTransformerBackend`` (optional): a pretrained local model, used only when it
-  is already on disk. ``predictor models download`` fetches it explicitly.
+* ``HybridBackend`` (default when the ``wordllama`` package is installed): the bundled
+  pretrained WordLlama embeddings combined with the syllabus-fitted TF-IDF. See
+  ``pretrained.py``. It is used at every dataset size.
+* ``SentenceTransformerBackend`` (optional): a larger pretrained local model, used only when
+  it is already on disk. ``predictor models download`` fetches it explicitly.
 
 All vectors are L2-normalised, so a dot product is a cosine similarity.
 """
@@ -31,7 +34,7 @@ log = get_logger("embeddings")
 
 class EmbeddingBackend(Protocol):
     name: str
-    kind: str  # "tfidf" or "neural"
+    kind: str  # "tfidf", "hybrid", "pretrained" or "neural"
 
     def fit(self, corpus: list[str]) -> None: ...
 
@@ -135,11 +138,35 @@ def neural_available(settings: Settings) -> tuple[bool, str]:
     return True, ""
 
 
+def get_pretrained(settings: Settings) -> tuple["object | None", str]:
+    """The pretrained general-language backend used for semantic evidence, or (None, reason)."""
+    from .pretrained import PretrainedBackend, pretrained_available
+
+    if str(settings.embeddings.pretrained).lower() in ("none", "off", ""):
+        return None, "the pretrained semantic model is switched off in Settings (embeddings.pretrained)"
+    ok, reason = pretrained_available()
+    if not ok:
+        return None, reason
+    return _shared_pretrained(PretrainedBackend), ""
+
+
+_PRETRAINED_INSTANCE = None
+
+
+def _shared_pretrained(cls):
+    global _PRETRAINED_INSTANCE
+    if _PRETRAINED_INSTANCE is None:
+        _PRETRAINED_INSTANCE = cls()
+    return _PRETRAINED_INSTANCE
+
+
 def get_backend(settings: Settings, cache: EmbeddingCacheLike | None = None,
                 factory: Callable[[], EmbeddingBackend] | None = None) -> tuple[EmbeddingBackend, str]:
-    """Return (backend, note). ``note`` explains any fallback for the analysis report."""
+    """Return (alignment backend, note). ``note`` explains any fallback for the analysis report."""
     if factory is not None:
         return factory(), ""
+    from .pretrained import HybridBackend
+
     choice = str(settings.embeddings.backend).lower()
     if choice in ("auto", "sentence-transformers", "neural"):
         ok, reason = neural_available(settings)
@@ -151,9 +178,21 @@ def get_backend(settings: Settings, cache: EmbeddingCacheLike | None = None,
             except Exception as exc:  # pragma: no cover - depends on local model files
                 reason = f"failed to load the local model: {exc}"
         if choice != "auto":
-            note = f"Neural embeddings requested but unavailable ({reason}); using TF-IDF instead."
             log_event(log, "embedding_fallback", reason=reason)
-            return TfidfBackend(settings), note
+            pre, _ = get_pretrained(settings)
+            if pre is not None:
+                return HybridBackend(settings, pre), (f"Neural embeddings requested but unavailable ({reason}); "
+                                                      f"using the bundled pretrained model with TF-IDF instead.")
+            return TfidfBackend(settings), f"Neural embeddings requested but unavailable ({reason}); using TF-IDF."
+    if choice in ("auto", "hybrid"):
+        pre, reason = get_pretrained(settings)
+        if pre is not None:
+            backend = HybridBackend(settings, pre)
+            log_event(log, "embedding_backend", backend=backend.name)
+            return backend, ""
+        log_event(log, "embedding_fallback", reason=reason)
+        return TfidfBackend(settings), (f"The pretrained semantic model is unavailable ({reason}); syllabus "
+                                        f"alignment uses TF-IDF only and semantic evidence is limited.")
     return TfidfBackend(settings), ""
 
 

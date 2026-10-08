@@ -79,11 +79,14 @@ class AlignmentResult:
     unknown_ratio: float
     reason: str
     best_score: float = 0.0
+    # Score of every mappable syllabus node (aligned with SyllabusAligner.node_ids); used for
+    # semantic soft evidence, so near-miss topics also get a little credit.
+    score_vector: np.ndarray | None = None
 
 
 def thresholds_for(settings: Settings, backend_kind: str) -> dict[str, float]:
     table = settings.alignment.thresholds
-    key = "neural" if backend_kind == "neural" else "tfidf"
+    key = backend_kind if backend_kind in table else "tfidf"
     t = table[key]
     return {"clearly_in": float(t.clearly_in), "probably_in": float(t.probably_in), "outside": float(t.outside)}
 
@@ -150,6 +153,14 @@ class SyllabusAligner:
         n_docs = max(len(tree.nodes), 1)
         self.idf = {t: math.log((1 + n_docs) / (1 + c)) + 1.0 for t, c in df.items()}
         self.df = dict(df)
+        # Document frequency over theory nodes only (laboratory headings such as "practical work" excluded),
+        # used to decide whether a shared term is a distinctive syllabus term.
+        theory_df: Counter[str] = Counter()
+        for nid in tree.nodes:
+            if "lab" in tree.nodes[nid].kinds or any("lab" in tree.nodes[a].kinds for a in tree.ancestors(nid)):
+                continue
+            theory_df.update(set(content_terms(tree.term_text(nid), self.instruction)))
+        self.theory_df = dict(theory_df)
         self.max_idf = math.log(1 + n_docs) + 1.0
         for nid in self.node_ids:
             terms = set(content_terms(tree.term_text(nid), self.instruction))
@@ -255,9 +266,11 @@ class SyllabusAligner:
         if not unique_terms:
             status, reason = "C", "The question has no content words to match (check the text or OCR)."
         else:
-            # A shared distinctive term (used by at most two syllabus nodes, e.g. "weir") rules out
-            # an out-of-syllabus verdict based on unknown terms alone.
-            distinctive = any(t in self.node_terms[best] and self.df.get(t, 99) <= 2 for t in unique_terms)
+            # A distinctive syllabus term (in the syllabus text of at most two nodes, e.g. "weir") rules out
+            # an out-of-syllabus verdict based on unknown terms alone, whichever node currently scores best.
+            # Terms that feedback borrowed from questions (phrasing such as "working of") and words from
+            # laboratory headings do not count: ``theory_df`` comes from the theory syllabus text only.
+            distinctive = any(0 < self.theory_df.get(t, 0) <= 2 for t in unique_terms)
             status, reason = self._status(best_score, float(sims[best]), float(coverage[best]),
                                           0.0 if distinctive else unknown_ratio)
 
@@ -288,7 +301,7 @@ class SyllabusAligner:
                 matched_terms=[surface.get(t, t) for t in shared][:12], evidence_text=evidence[:400]))
             chosen.append(nid)
         return AlignmentResult(q.id, status, matches, [surface.get(t, t) for t in unknown][:12],
-                               round(unknown_ratio, 3), reason, round(best_score, 4))
+                               round(unknown_ratio, 3), reason, round(best_score, 4), scores.astype(np.float32))
 
     def _status(self, score: float, sim: float, cov: float, unknown_ratio: float) -> tuple[str, str]:
         th = self.th

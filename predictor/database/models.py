@@ -31,6 +31,8 @@ class Course(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     settings: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # Synthetic courses (the demo) are never used to train or update cross-course models.
+    is_synthetic: Mapped[bool] = mapped_column(Boolean, default=False)
 
     files: Mapped[list["SourceFile"]] = relationship(back_populates="course", cascade="all, delete-orphan")
     exams: Mapped[list["Exam"]] = relationship(back_populates="course", cascade="all, delete-orphan")
@@ -152,6 +154,9 @@ class Exam(Base):
     exclusion_reason: Mapped[str] = mapped_column(String(400), default="")
     duplicate_of_id: Mapped[Optional[int]] = mapped_column(ForeignKey("exam.id", ondelete="SET NULL"), nullable=True)
     user_edited_fields: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    # Where the paper came from: "upload" (a real past paper), "demo" (synthetic demo data) or
+    # "manual". Generated questions and simulated papers are never stored as exams.
+    source: Mapped[str] = mapped_column(String(20), default="upload")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     course: Mapped[Course] = relationship(back_populates="exams")
@@ -260,6 +265,7 @@ class AnalysisRun(Base):
     config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     data_fingerprint: Mapped[str] = mapped_column(String(64), default="")
     summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    engine_version: Mapped[str] = mapped_column(String(20), default="")
 
     course: Mapped[Course] = relationship(back_populates="runs")
     artifacts: Mapped[list["AnalysisArtifact"]] = relationship(cascade="all, delete-orphan")
@@ -295,6 +301,14 @@ class ModelResult(Base):
     metrics: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     metric_se: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     notes: Mapped[str] = mapped_column(Text, default="")
+    # "baseline", "component" or "ensemble"; scope "course" (estimated from this course) or
+    # "global" (pretrained or cross-course knowledge).
+    role: Mapped[str] = mapped_column(String(20), default="")
+    scope: Mapped[str] = mapped_column(String(20), default="course")
+    status: Mapped[str] = mapped_column(String(20), default="")
+    weight: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    reliability: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
 class BacktestFold(Base):
@@ -332,6 +346,8 @@ class Prediction(Base):
     contributions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     why_not: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    evidence_strength: Mapped[str] = mapped_column(String(20), default="")
+    uncertainty: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
 class PredictedQuestion(Base):
@@ -348,3 +364,54 @@ class PredictedQuestion(Base):
     rank: Mapped[int] = mapped_column(Integer, default=0)
     evidence_question_ids: Mapped[list[Any]] = mapped_column(JSON, default=list)
     grounding: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class ModelRegistry(Base):
+    """Fitted models. scope "global": cross-course knowledge (simulated prior, repository update);
+    scope "course": parameters estimated from one course (course_id set)."""
+
+    __tablename__ = "model_registry"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scope: Mapped[str] = mapped_column(String(20))  # global | course
+    course_id: Mapped[Optional[int]] = mapped_column(ForeignKey("course.id", ondelete="CASCADE"), nullable=True,
+                                                     index=True)
+    run_id: Mapped[Optional[int]] = mapped_column(ForeignKey("analysis_run.id", ondelete="CASCADE"), nullable=True)
+    name: Mapped[str] = mapped_column(String(60))
+    version: Mapped[str] = mapped_column(String(20), default="1")
+    source: Mapped[str] = mapped_column(String(60), default="")  # simulation | simulation+repository | course
+    fingerprint: Mapped[str] = mapped_column(String(64), default="")
+    params: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    training: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class CourseFeatureSet(Base):
+    """Scale-free feature rows of one course (one row per course, replaced on each analysis).
+
+    These rows are the only thing other courses learn from: no topic names, no raw counts.
+    Rows of synthetic courses are stored flagged and never used for cross-course training."""
+
+    __tablename__ = "course_feature_set"
+    __table_args__ = (UniqueConstraint("course_id", "layer", name="uq_course_feature_layer"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    course_id: Mapped[int] = mapped_column(ForeignKey("course.id", ondelete="CASCADE"), index=True)
+    run_id: Mapped[Optional[int]] = mapped_column(ForeignKey("analysis_run.id", ondelete="SET NULL"), nullable=True)
+    layer: Mapped[str] = mapped_column(String(20), default="topic")
+    is_synthetic: Mapped[bool] = mapped_column(Boolean, default=False)
+    feature_names: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    n_rows: Mapped[int] = mapped_column(Integer, default=0)
+    n_exams: Mapped[int] = mapped_column(Integer, default=0)
+    X: Mapped[bytes] = mapped_column(LargeBinary)
+    y: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SchemaVersion(Base):
+    __tablename__ = "schema_version"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    version: Mapped[int] = mapped_column(Integer)
+    applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    note: Mapped[str] = mapped_column(Text, default="")

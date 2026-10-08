@@ -28,7 +28,10 @@ def prediction_dict(p: Prediction) -> dict[str, Any]:
             "relative_score": (p.features or {}).get("relative_score"),
             "contributions": (p.contributions or {}).get("values", {}),
             "contribution_source": (p.contributions or {}).get("source", ""),
-            "evidence": (p.evidence or {}).get("lines", []), "why_not": p.why_not or []}
+            "signal_contributions": ((p.features or {}).get("signal_contributions") or {}).get("values", {}),
+            "signal_source": ((p.features or {}).get("signal_contributions") or {}).get("source", ""),
+            "evidence": (p.evidence or {}).get("lines", []), "why_not": p.why_not or [],
+            "evidence_strength": p.evidence_strength or "", "uncertainty": p.uncertainty or {}}
 
 
 def question_dict(q: ExamQuestion, exam: Exam | None = None) -> dict[str, Any]:
@@ -103,7 +106,9 @@ class ResultsService:
             return {
                 "models": [{"layer": m.layer, "name": m.model_name, "display": m.display_name, "family": m.family,
                             "complexity": m.complexity, "enabled": m.enabled, "gate_reason": m.gate_reason,
-                            "selected": m.selected, "metrics": m.metrics, "se": m.metric_se, "notes": m.notes}
+                            "selected": m.selected, "metrics": m.metrics, "se": m.metric_se, "notes": m.notes,
+                            "role": m.role, "scope": m.scope, "status": m.status, "weight": m.weight,
+                            "reliability": m.reliability, "evidence": m.evidence or {}}
                            for m in models],
                 "folds": [{"model": f.model_name, "target": f.target_label, "target_index": f.target_index,
                            "train_exams": f.n_train_exams, "metrics": f.metrics} for f in folds],

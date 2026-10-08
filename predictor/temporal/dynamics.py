@@ -155,7 +155,7 @@ def trend_slope(Y: np.ndarray, window: int = 6) -> np.ndarray:
 def sequential_lift(Y: np.ndarray, prior_strength: float = 2.0) -> np.ndarray:
     """L[j, k] = smoothed P(k at s | j at s-1) / P(k), from consecutive exam pairs."""
     T, K = Y.shape
-    if T < 3:
+    if T < 2:  # no consecutive pair of exams yet
         return np.ones((K, K))
     prev, nxt = Y[:-1], Y[1:]
     base = (Y.mean(axis=0) + 1e-6)

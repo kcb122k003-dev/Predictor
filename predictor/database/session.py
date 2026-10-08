@@ -10,6 +10,7 @@ from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from .migrations import migrate
 from .models import Base
 
 FTS_DDL = """
@@ -49,6 +50,7 @@ class Database:
 
     def create_all(self) -> None:
         Base.metadata.create_all(self.engine)
+        self.migrated_columns = migrate(self.engine)
         try:
             with self.engine.begin() as conn:
                 conn.execute(text(FTS_DDL))

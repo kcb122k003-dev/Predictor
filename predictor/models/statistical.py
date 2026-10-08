@@ -1,4 +1,9 @@
-"""Transparent statistical models: baselines, Bayesian rates, Markov, hazard, semantic."""
+"""Reference baselines (frequency, recency, windows) and the two-state Markov component.
+
+The hierarchical Bayesian, temporal, semantic and structural components live in
+``components.py``. The baselines here are kept for comparison: every report shows how the
+evidence-aware ensemble does against them on the same folds.
+"""
 
 from __future__ import annotations
 
@@ -86,63 +91,11 @@ class FreqRecencyModel(BaseModel):
         return ModelOutput(0.5 * a + 0.5 * b)
 
 
-class BetaBinomialModel(BaseModel):
-    name, display, family, complexity = "beta_binomial", "Bayesian rate (empirical Bayes)", "bayesian", 3
-    description = ("Recency-weighted appearance rate per topic, shrunk toward the pooled rate of all topics, "
-                   "so a topic seen once in three exams is not treated as a 33% certainty.")
-
-    def predict(self, t: int, ctx: ModelContext) -> ModelOutput:
-        Y = ctx.panel.until(t).Y
-        T = Y.shape[0]
-        if T == 0:
-            return ModelOutput(np.zeros(ctx.panel.K))
-        cfg = ctx.settings.temporal
-        h = float(cfg.default_half_life)
-        ages = np.arange(T - 1, -1, -1, dtype=float)
-        w = 0.5 ** (ages / h)
-        hits = w @ Y
-        n = w.sum()
-        p0 = float(Y.mean())
-        m = float(cfg.rate_prior_strength)
-        post = (hits + m * p0) / (n + m)
-        return ModelOutput(post, {"pooled_rate": p0, "prior_strength": m})
-
-
 class MarkovModel(BaseModel):
-    name, display, family, complexity = "markov", "Two-state Markov (empirical Bayes)", "temporal", 3
+    name, display, family, complexity, role = "markov", "Two-state Markov (empirical Bayes)", "temporal", 3, "component"
+    df = 2.0
     description = ("P(appear | appeared or not in the previous exam), per topic, shrunk toward the pooled "
                    "transition rates. Captures 'just tested, less likely again' or 'tends to persist'.")
 
     def predict(self, t: int, ctx: ModelContext) -> ModelOutput:
         return ModelOutput(_feat(ctx, t, "markov_next") + 1e-3 * _feat(ctx, t, "ewma_short"))
-
-
-class HazardModel(BaseModel):
-    name, display, family, complexity = "hazard", "Pooled hazard (time since last appearance)", "survival", 3
-    description = ("Discrete-time hazard: chance of appearing given the number of exams since the topic last "
-                   "appeared, pooled across topics and scaled by each topic's own rate.")
-
-    def gate(self, panel, ctx):
-        need = int(ctx.settings.models.sufficiency.min_exams_hazard)
-        if panel.T < need:
-            return False, f"Needs at least {need} exams to estimate gap-specific hazards (have {panel.T})."
-        return True, ""
-
-    def predict(self, t: int, ctx: ModelContext) -> ModelOutput:
-        hazard = _feat(ctx, t, "hazard")
-        Y = ctx.panel.until(t).Y
-        if Y.shape[0] == 0:
-            return ModelOutput(np.zeros(ctx.panel.K))
-        m = float(ctx.settings.temporal.rate_prior_strength)
-        p0 = float(Y.mean()) + 1e-9
-        rate = (Y.sum(axis=0) + m * p0) / (Y.shape[0] + m)
-        return ModelOutput(np.clip(hazard * np.sqrt(rate / p0), 0.0, 1.0))
-
-
-class SemanticModel(BaseModel):
-    name, display, family, complexity = "semantic", "Semantic soft recurrence", "semantic", 3
-    description = ("Recency-weighted similarity between each topic and every past question, so near-miss "
-                   "and multi-topic questions also count.")
-
-    def predict(self, t: int, ctx: ModelContext) -> ModelOutput:
-        return ModelOutput(_feat(ctx, t, "soft_ewma") + 0.1 * _feat(ctx, t, "ewma_long"))
