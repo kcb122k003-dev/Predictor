@@ -65,7 +65,8 @@ def cmd_demo(args) -> int:
                       + (" (duplicate paper, excluded)" if out.get("duplicate_of") else ""))
     service = AnalysisService(ctx)
     summary = service.run(service.create_run(cid))
-    print(f"\nCourse {cid} analysed in {summary['seconds']}s. Selected model: {summary['selected_display']}.")
+    print(f"\nCourse {cid} analysed in {summary['seconds']}s. Final ranking: {summary['selected_display']}.")
+    print(f"{summary.get('inference_mode', '')}: {summary.get('inference_message', '')}")
     print(summary["selection_reason"])
     print("Start the app with: predictor serve")
     return 0
@@ -91,10 +92,12 @@ def cmd_doctor(args) -> int:
     ctx = _ctx(args)
     ocr = ctx.ocr
     print(f"  OCR: {'Tesseract ' + str(ocr.version()) if ocr.available else 'not available - ' + ocr.unavailable_reason}")
-    from .embeddings.backends import neural_available
+    from .embeddings.backends import get_pretrained, neural_available
 
     neural, why = neural_available(ctx.settings)
-    print(f"  Neural embeddings: {'ready' if neural else 'not used (' + why + ')'}; the offline TF-IDF model always works")
+    pre, pre_why = get_pretrained(ctx.settings)
+    print(f"  Pretrained semantic model: {'ready (' + pre.name + ', bundled, offline)' if pre else 'unavailable (' + pre_why + ')'}")
+    print(f"  Larger neural embeddings: {'ready' if neural else 'not used (' + why + ')'}; the offline TF-IDF model always works")
     print(f"  Data folder: {ctx.data_dir} ({'writable' if _writable(ctx.data_dir) else 'NOT writable'})")
     print("All required components are present." if ok else "Some required components are missing (see above).")
     return 0 if ok else 1
@@ -146,8 +149,9 @@ def cmd_analyze(args) -> int:
 
     service = AnalysisService(_ctx(args))
     summary = service.run(service.create_run(args.course))
-    print(json.dumps({k: summary[k] for k in ("exams", "questions", "topics", "selected_display", "selection_reason",
-                                               "calibration_reason", "seconds")}, indent=2))
+    print(json.dumps({k: summary.get(k) for k in ("exams", "questions", "topics", "inference_mode", "inference_message",
+                                                   "selected_display", "selection_reason", "calibration_reason",
+                                                   "seconds")}, indent=2))
     return 0
 
 

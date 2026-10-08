@@ -44,6 +44,8 @@ class QuestionRecord:
     semantic: dict[int, float] = field(default_factory=dict)  # item column -> share of this question (sums to 1)
     exact_repeat: bool = False
     para_repeat: bool = False
+    mapping_confidence: float = 1.0
+    parse_confidence: float = 1.0
 
 
 @dataclass
@@ -64,6 +66,9 @@ class Panel:
     semantic: np.ndarray | None = None
     item_sim: np.ndarray | None = None  # (K, K) syllabus-only similarity between items (no exam text)
     format_prior: np.ndarray | None = None  # (K, F) format tendency from syllabus tags (no exam text)
+    # (T, K, 3) data-quality sums over the questions behind each cell: mapping confidence, parse/OCR
+    # confidence, marks known (divide by n_questions for means).
+    quality: np.ndarray | None = None
     item_unit: np.ndarray | None = None  # (K,) unit column index per item (for unit features)
     unit_ids: list[int] = field(default_factory=list)
     layer: str = "topic"
@@ -87,6 +92,7 @@ class Panel:
             formats=self.formats[:t].copy(), n_questions=self.n_questions[:t].copy(),
             exact_repeat=self.exact_repeat[:t].copy(), para_repeat=self.para_repeat[:t].copy(),
             semantic=self.semantic_matrix()[:t].copy(),
+            quality=self.quality[:t].copy() if self.quality is not None else None,
             meta=dict(self.meta),
         )
 
@@ -100,7 +106,8 @@ class Panel:
             self, exams=[self.exams[i] for i in keep], Y=self.Y[keep].copy(), marks=self.marks[keep].copy(),
             soft=self.soft[keep].copy(), formats=self.formats[keep].copy(), n_questions=self.n_questions[keep].copy(),
             exact_repeat=self.exact_repeat[keep].copy(), para_repeat=self.para_repeat[keep].copy(),
-            semantic=self.semantic_matrix()[keep].copy(), meta=dict(self.meta))
+            semantic=self.semantic_matrix()[keep].copy(),
+            quality=self.quality[keep].copy() if self.quality is not None else None, meta=dict(self.meta))
 
     def total_marks(self) -> np.ndarray:
         return np.array([max(e.total_marks, 1e-9) for e in self.exams], dtype=float)
@@ -123,6 +130,7 @@ def build_panel(exams: list[ExamInfo], item_ids: list[int], item_labels: list[st
     exact = np.zeros((T, K))
     para = np.zeros((T, K))
     semantic = np.zeros((T, K))
+    quality = np.zeros((T, K, 3))
     f_index = {f: i for i, f in enumerate(FORMATS)}
     for q in questions:
         t = q.exam_index
@@ -143,6 +151,7 @@ def build_panel(exams: list[ExamInfo], item_ids: list[int], item_labels: list[st
             if q.marks is not None:
                 marks[t, col] += q.marks * w / total_w
             formats[t, col, f_index.get(q.format, f_index["theory"])] += 1
+            quality[t, col] += (q.mapping_confidence, q.parse_confidence, 1.0 if q.marks is not None else 0.0)
             if q.exact_repeat:
                 exact[t, col] += 1
             if q.para_repeat:
@@ -150,4 +159,4 @@ def build_panel(exams: list[ExamInfo], item_ids: list[int], item_labels: list[st
     return Panel(exams=exams, item_ids=list(item_ids), item_labels=list(item_labels), Y=Y, marks=marks,
                  soft=soft, formats=formats, n_questions=nq, exact_repeat=exact, para_repeat=para,
                  static=static or {}, item_unit=item_unit, unit_ids=unit_ids or [], layer=layer, semantic=semantic,
-                 item_sim=item_sim, format_prior=format_prior)
+                 item_sim=item_sim, format_prior=format_prior, quality=quality)

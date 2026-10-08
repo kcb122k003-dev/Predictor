@@ -162,6 +162,7 @@ class CoverageModel(BaseModel):
     name, display, family, complexity, role = "coverage", "Syllabus coverage structure", "structure", 2, "component"
     df = 0.5
     prior_knowledge = True
+    scope = "syllabus"
     description = ("How often each syllabus unit is examined (Bayesian, at the exam level) times the topic's weight "
                    "in its unit from the syllabus (hours, marks or breadth). Works before any paper is uploaded.")
 
@@ -249,7 +250,8 @@ class GeneralRankingModel(BaseModel):
 
 COURSE_ONLY = ["count_log", "soft_ewma", "soft_mean", "sem_ewma", "sem_neighbors", "marks_share", "marks_share_recent",
                "high_mark_rate", "numerical_share", "derivation_share", "theory_share", "type_entropy",
-               "hours_share", "marks_weight_share", "breadth", "exact_repeat_rate", "para_repeat_rate"]
+               "hours_share", "marks_weight_share", "breadth", "exact_repeat_rate", "para_repeat_rate",
+               "map_conf", "parse_conf", "marks_known"]
 
 
 class CourseLogisticModel(BaseModel):

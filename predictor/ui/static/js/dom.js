@@ -51,6 +51,27 @@ export function badge(text, kind = "") {
   return h("span", { class: `badge ${kind}` }, text);
 }
 
+// Inference component status (never "off": a component is active, limited, downweighted or lacks an input).
+export function componentBadge(status) {
+  const kinds = { ACTIVE: "ok", LIMITED: "info", DOWNWEIGHTED: "warn", UNAVAILABLE: "", REFERENCE: "" };
+  const titles = {
+    ACTIVE: "Running with enough evidence for its parameters",
+    LIMITED: "Running and contributing, with high uncertainty (little course evidence)",
+    DOWNWEIGHTED: "Running, but earlier papers showed it ranks worse than the other components",
+    UNAVAILABLE: "An input it needs does not exist for this course",
+    REFERENCE: "Baseline kept for comparison",
+  };
+  return h("span", { class: `badge ${kinds[status] ?? ""}`, title: titles[status] || "" }, status || "");
+}
+
+// Horizontal share bar (0..max) with a label and value.
+export function shareBar(label, value, max, text) {
+  const w = max > 0 ? Math.max(0, Math.min(100, 100 * value / max)) : 0;
+  return h("div", { class: "share" }, h("span", {}, label),
+    h("div", { class: "track" }, h("div", { class: "fill", style: { width: `${w}%` } })),
+    h("span", { class: "mono" }, text ?? value.toFixed(2)));
+}
+
 export function statusBadge(status) {
   const labels = { A: "A clearly in", B: "B probably in", C: "C uncertain", D: "D outside", unmapped: "unmapped" };
   return h("span", { class: `badge status-${status}`, title: labels[status] || status }, labels[status] || status);

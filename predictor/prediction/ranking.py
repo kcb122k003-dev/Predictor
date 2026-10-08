@@ -136,6 +136,7 @@ def build_topic_predictions(panel: Panel, report: BacktestReport, fm: FeatureMat
         if semantic_evidence and panel.item_ids[i] in semantic_evidence:
             facts["semantic_evidence"] = semantic_evidence[panel.item_ids[i]]
         strength = evidence_label(float(post.prior_contribution[i])) if post is not None else "Minimal"
+        facts["evidence_summary"] = _evidence_summary(facts, strength)
         conf = _confidence(facts, p, lo, hi, probs is not None, unc)
         evidence = _evidence_lines(panel, facts, syllabus_location.get(panel.item_ids[i]) if syllabus_location else None)
         evidence += _model_lines(facts, unc, contributions[i] if contributions else None, strength)
@@ -204,6 +205,7 @@ def _facts(panel: Panel, fm: FeatureMatrix, i: int, haz, mapping_confidence, rot
     window = min(6, T)
     facts: dict[str, Any] = {
         "exams": T, "appearances": int(y.sum()), "recent_window": window,
+        "questions_total": int(panel.n_questions[:, i].sum()) if T else 0,
         "recent_appearances": int(y[-window:].sum()) if T else 0,
         "last_label": panel.exams[idx[-1]].label if idx.size else None,
         "exams_since_last": int(T - idx[-1]) if idx.size else None,
@@ -266,8 +268,25 @@ def _confidence(facts: dict[str, Any], p, lo, hi, calibrated: bool, unc: dict[st
     return "Medium"
 
 
+def _evidence_summary(facts: dict[str, Any], strength: str) -> str:
+    """Plain description of where a topic's evidence comes from, e.g. 'Sparse historical evidence (2 of 4 papers,
+    3 questions) + strong syllabus match'."""
+    T, a, nq = facts.get("exams", 0), facts.get("appearances", 0), facts.get("questions_total", 0)
+    hist = {"Strong": "Strong", "Moderate": "Moderate", "Limited": "Sparse", "Minimal": "Very sparse"}.get(strength, strength)
+    text = f"{hist} historical evidence ({a} of {T} paper{'s' if T != 1 else ''}, {nq} question{'s' if nq != 1 else ''})"
+    mc = facts.get("mapping_confidence")
+    if mc is not None:
+        text += " + " + ("strong" if mc >= 0.75 else "moderate" if mc >= 0.55 else "weak") + " syllabus match"
+    sem = facts.get("semantic_evidence")
+    if sem and not a:
+        text += f" + semantic neighbours only (closest past question similarity {sem[0]['similarity']:.2f})"
+    return text
+
+
 def _model_lines(facts: dict[str, Any], unc: dict[str, Any], contrib: dict[str, float] | None, strength: str) -> list[str]:
     lines = []
+    if facts.get("evidence_summary"):
+        lines.append(f"Evidence: {facts['evidence_summary']}.")
     b = facts.get("bayes")
     if b:
         lo, hi = b["credible_interval"]

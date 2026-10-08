@@ -12,13 +12,15 @@ export async function renderHelp(main) {
     section("3. Syllabus and mapping",
       "Every question is matched to the syllabus. Status A means clearly in the syllabus, B probably in, C uncertain, D outside. Only A and validated B questions count; questions outside the current syllabus are listed as excluded with the reason. You can override any mapping."),
     section("4. Analyze & Predict",
-      "The app compares many prediction methods on your own history. For each past paper, every method predicts it using only the papers before it, and the results are scored. The simplest method that is within one standard error of the best is used for the next paper. Complex methods are switched off when there are too few papers to train them reliably, and the reason is shown."),
+      "The ranking combines several kinds of evidence: a pretrained language model, a cross-course model of how examiners behave, Bayesian recurrence of each topic, syllabus structure, timing patterns and models learned from this course. Each component's weight depends on how much evidence supports it (papers versus the number of parameters it estimates from your course) and on how well it predicted your earlier papers, where each past paper is predicted from the papers before it.",
+      "Nothing is switched off because a course is small. With two or three papers the pretrained, cross-course and Bayesian parts carry most of the weight and every topic shows a wide rank range; course-specific learned models gain weight as papers accumulate and prove themselves. If a single method beat the combined ranking by more than one standard error on your papers, that method is used instead and the reason is shown."),
     section("5. Read the results",
       h("ul", { class: "evidence" },
         h("li", {}, "Priority categories group topics by evidence strength. Extremely High needs several independent signals agreeing."),
         h("li", {}, "Percentages are shown as probabilities only when calibration was validated on held-out papers. Otherwise they are relative scores."),
-        h("li", {}, "Click a topic for its evidence, the past questions behind it, signal contributions and predicted question formulations."),
+        h("li", {}, "Each topic shows a rank range (how far it could move with the available papers) and its evidence strength (how much of its estimate comes from its own history rather than the prior)."),
+        h("li", {}, "Click a topic for its evidence, the past questions behind it, each component's contribution, the Bayesian estimate with its credible interval, the most similar past questions and predicted question formulations."),
         h("li", {}, "Predicted question formulations reuse your course's own wording and syllabus phrases. Numerical questions are past numericals shown as patterns; the app never invents numbers."))),
-    section("Privacy", "Everything runs on this computer. The server listens only on 127.0.0.1. No telemetry and no cloud processing. Downloading an optional neural model is a separate command you run yourself."),
+    section("Privacy", "Everything runs on this computer. The server listens only on 127.0.0.1. No telemetry and no cloud processing. The bundled pretrained model ships with the app; downloading an optional larger model is a separate command you run yourself."),
   );
 }

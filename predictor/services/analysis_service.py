@@ -86,6 +86,7 @@ class Leaf:
     options: list[Any]
     path_label: str
     manual: list[tuple[int, str]] = field(default_factory=list)  # (topic id, status)
+    parse_confidence: float = 1.0
     format: str = "theory"
     alignment: AlignmentResult | None = None
     counted: list[tuple[int, float]] = field(default_factory=list)  # (mappable node id, weight)
@@ -182,7 +183,9 @@ class AnalysisService:
                     manual = [(m.topic_id, m.status) for m in q.mappings if m.method == "manual" and m.topic_id]
                     leaves.append(Leaf(q.id, idx, e.id, q.text or "", q.context_text or q.text or "", q.marks,
                                        list(q.question_types or []), q.type_user_edited, list(q.options or []),
-                                       q.path_label, manual))
+                                       q.path_label, manual,
+                                       parse_confidence=float(q.parse_confidence if q.parse_confidence is not None
+                                                              else 1.0)))
             snapshot = [(e.id, e.order_index, e.structure, e.full_marks, e.duration,
                          [(q.id, q.parent_id, q.label, q.marks, q.or_group, q.is_optional, q.is_leaf, q.text, q.section_id)
                           for q in rows]) for e, rows in exam_rows]
@@ -391,7 +394,12 @@ class AnalysisService:
                     "validation": report.validation, "general_model": general_info,
                     "uncertainty": {"jackknife_replicates": uncertainty["jackknife_replicates"],
                                     "posterior_draws": uncertainty["posterior_draws"],
-                                    "held_fixed": uncertainty["held_fixed"]},
+                                    "held_fixed": uncertainty["held_fixed"],
+                                    "levels": dict(Counter(uncertainty["level"])),
+                                    "median_rank_range": float(np.median(uncertainty["rank_high"] - uncertainty["rank_low"]))
+                                    if len(topic_ids) else None,
+                                    "overall": _overall_uncertainty(uncertainty["level"])},
+                    "evidence_quality": _evidence_quality(preds),
                     "ensemble": _ensemble_summary(report), "generation_checks": verifier.summary(),
                     "synthetic_course": synthetic, "notes": profile.notes}
         # Kept under its old key for older clients: the same evidence status, never "disabled".
@@ -552,7 +560,8 @@ class AnalysisService:
             records.append(QuestionRecord(q.id, q.exam_index, q.text, q.marks, q.format, q.types, list(items.items()),
                                           status=q.status, soft=soft, semantic=semantic,
                                           exact_repeat=bool(recurrence.exact_prev.get(q.id)),
-                                          para_repeat=bool(recurrence.para_prev.get(q.id))))
+                                          para_repeat=bool(recurrence.para_prev.get(q.id)),
+                                          mapping_confidence=_mapping_confidence(q), parse_confidence=q.parse_confidence))
         labels = [tree.nodes[i].label() for i in item_ids]
         item_unit = np.array([unit_col.get(tree.unit_of(i), 0) for i in item_ids], dtype=int)
         static = _static_features(tree, item_ids, unit_ids)
@@ -768,6 +777,31 @@ def _location(tree: TopicTree, nid: int) -> str:
         r = refs[0]
         return f"{path} ({r.get('file')}, page {r.get('page')})"
     return path
+
+
+def _overall_uncertainty(levels: list[str]) -> str:
+    """Prediction uncertainty of the top of the ranking: the most common level among topics."""
+    if not levels:
+        return "High"
+    counts = Counter(levels)
+    return max(("High", "Medium", "Low"), key=lambda lv: (counts.get(lv, 0), lv == "High"))
+
+
+def _evidence_quality(preds) -> str:
+    """Overall evidence quality: the typical evidence strength of the topics ranked in the top half."""
+    top = [p.evidence_strength for p in preds[: max(1, len(preds) // 2)] if p.evidence_strength]
+    if not top:
+        return "Minimal"
+    order = ["Minimal", "Limited", "Moderate", "Strong"]
+    return order[int(np.median([order.index(s) for s in top]))]
+
+
+def _mapping_confidence(q: Leaf) -> float:
+    if q.manual:
+        return 1.0
+    if q.alignment is None or not q.alignment.matches:
+        return 0.0
+    return float(q.alignment.matches[0].confidence)
 
 
 def _semantic_mass(q: Leaf, items: dict[int, float], node_col: np.ndarray | None, K: int,

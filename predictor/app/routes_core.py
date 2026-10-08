@@ -41,12 +41,16 @@ def health(request: Request) -> dict[str, Any]:
     app = ctx(request)
     ocr = app.ocr
     neural_ok, neural_reason = neural_available(app.settings)
+    from ..embeddings.backends import get_pretrained
+
+    pretrained, pretrained_reason = get_pretrained(app.settings)
     return {
         "version": __version__, "data_dir": str(app.data_dir),
         "ocr": {"available": ocr.available, "version": ocr.version(), "reason": ocr.unavailable_reason},
         "embeddings": {"configured": app.settings.embeddings.backend, "neural_available": neural_ok,
                        "neural_reason": neural_reason, "model": app.settings.embeddings.model_name,
-                       "model_dir": str(model_dir(app.settings))},
+                       "model_dir": str(model_dir(app.settings)), "pretrained_available": pretrained is not None,
+                       "pretrained_model": getattr(pretrained, "name", None), "pretrained_reason": pretrained_reason},
         "external_services": bool(app.settings.app.allow_external_services),
         "jobs_pending": request.app.state.jobs.pending,
     }

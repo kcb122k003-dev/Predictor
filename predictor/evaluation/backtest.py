@@ -357,8 +357,8 @@ def validation_summary(report: BacktestReport, panel: Panel) -> dict[str, Any]:
         out["message"] = (f"{panel.T} papers give {n} held-out fold. One fold shows whether the ranking was sensible "
                           f"for that paper but cannot measure reliability; treat the accuracy figure as anecdotal.")
     else:
-        out["message"] = (f"{panel.T} papers give {n} held-out folds. The 95% confidence interval of the selected "
-                          f"method's {p.upper()}@{report.k} is {width:.2f} wide"
+        out["message"] = (f"{panel.T} papers give {n} held-out folds. The 95% confidence interval of the final "
+                          f"ranking's {p.upper()}@{report.k} is {width:.2f} wide"
                           + ("; differences between methods smaller than that are not meaningful." if width else "."))
     return out
 
@@ -372,7 +372,7 @@ def leakage_audit(panel: Panel, settings: Settings, models: list[BaseModel], t: 
     """
     rng = np.random.default_rng(99)
     scrambled = Panel(**{**panel.__dict__})
-    for attr in ("Y", "marks", "soft", "formats", "n_questions", "exact_repeat", "para_repeat", "semantic"):
+    for attr in ("Y", "marks", "soft", "formats", "n_questions", "exact_repeat", "para_repeat", "semantic", "quality"):
         src = getattr(panel, attr)
         if src is None:
             continue

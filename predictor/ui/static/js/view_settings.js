@@ -24,7 +24,7 @@ const FIELDS = [
     ["ocr.deskew", "Straighten tilted scans", "checkbox", "", null],
   ]],
   ["Semantic model", [
-    ["embeddings.backend", "Embedding backend", "select:auto,tfidf,sentence-transformers", "auto uses a downloaded neural model if present, otherwise the offline TF-IDF model.", null],
+    ["embeddings.backend", "Embedding backend", "select:auto,hybrid,tfidf,sentence-transformers", "auto uses a downloaded sentence-transformer if present, otherwise the bundled pretrained model combined with TF-IDF (hybrid), otherwise TF-IDF alone.", null],
     ["embeddings.model_name", "Neural model name", "text", "Downloaded once with: predictor models download", null],
   ]],
 ];

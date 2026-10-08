@@ -170,6 +170,12 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 }
 .close-x { float: right; }
 
+.share { display: grid; grid-template-columns: 220px 1fr 64px; gap: 8px; align-items: center; font-size: .85rem; margin-bottom: 4px; }
+.share .track { position: relative; height: 10px; background: var(--panel-2); border-radius: 3px; overflow: hidden; }
+.share .track .fill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent); border-radius: 3px; }
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; font-size: .88rem; margin: 0; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; }
 .contrib { display: grid; grid-template-columns: 180px 1fr 60px; gap: 8px; align-items: center; font-size: .85rem; margin-bottom: 4px; }
 .contrib .track { position: relative; height: 12px; background: var(--panel-2); border-radius: 3px; }
 .contrib .track .pos { position: absolute; left: 50%; top: 0; bottom: 0; background: var(--ok); border-radius: 0 3px 3px 0; }
@@ -223,6 +229,7 @@ pre.pagetext { white-space: pre-wrap; background: var(--panel); border: 1px soli
   .topic-card .prob { grid-column: 2; text-align: left; }
   header.top { padding: 10px 16px; flex-wrap: wrap; }
   .contrib { grid-template-columns: 110px 1fr 50px; }
+  .share { grid-template-columns: 120px 1fr 50px; }
 }
 @media print {
   header.top, aside.side, .no-print, #toasts { display: none !important; }

@@ -25,6 +25,7 @@ FEATURE_GROUPS: dict[str, list[str]] = {
     "semantic": ["soft_ewma", "soft_mean", "sem_ewma", "sem_neighbors"],
     "bayesian": ["bayes_mean", "bayes_width"],
     "history": ["hist_log", "base_rate"],
+    "quality": ["map_conf", "parse_conf", "marks_known"],
     "marks": ["marks_share", "marks_share_recent", "high_mark_rate"],
     "question_type": ["numerical_share", "derivation_share", "theory_share", "type_entropy"],
     "cooccurrence": ["cooc_lift_last", "unit_ewma"],
@@ -37,7 +38,7 @@ GROUP_LABELS = {
     "frequency": "Historical frequency", "recency": "Recency", "temporal": "Recurrence dynamics",
     "semantic": "Semantic similarity", "marks": "Marks weight", "question_type": "Question type",
     "cooccurrence": "Topic co-occurrence", "syllabus": "Syllabus weight", "recurrence": "Question recurrence",
-    "bayesian": "Bayesian recurrence", "history": "History length",
+    "bayesian": "Bayesian recurrence", "history": "History length", "quality": "Data quality",
 }
 # Scale-free features that mean the same thing in every course. The general ranking model is
 # trained on these (simulated sequences plus other real courses) and the course-specific model
@@ -135,6 +136,15 @@ def compute_features(history: Panel, settings: Settings) -> FeatureMatrix:
     f["bayes_width"] = post.high - post.low
     f["hist_log"] = np.full(K, np.log1p(T))
     f["base_rate"] = np.full(K, float(Y.mean()))
+    # Data quality of the evidence behind each topic (questions before the cutoff only).
+    nq_hist = history.n_questions.sum(axis=0)
+    if history.quality is not None and history.quality.shape[:2] == (T, K):
+        qsum = history.quality.sum(axis=0)
+        for j, name in enumerate(("map_conf", "parse_conf", "marks_known")):
+            f[name] = np.where(nq_hist > 0, qsum[:, j] / np.maximum(nq_hist, 1), 0.0)
+    else:
+        for name in ("map_conf", "parse_conf", "marks_known"):
+            f[name] = np.where(nq_hist > 0, 1.0, 0.0)
 
     total = history.total_marks()[:, None]
     share = history.marks / total
