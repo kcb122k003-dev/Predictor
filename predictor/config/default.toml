@@ -205,10 +205,11 @@ hmm_iterations = 60
 enabled = ["random", "frequency", "last_exam", "window", "ewma", "linear_decay", "freq_recency", "recency", "beta_binomial", "semantic", "coverage", "question_type", "cooccurrence", "hazard", "markov", "hmm", "general", "logistic", "gradient_boosting", "random_forest", "ensemble"]
 
 [ensemble]
-# Weight of component m: reliability * exp(skill_temperature * skill), where reliability is
-# exams / (exams + parameters estimated from this course) and skill is the component's gain
-# over the average member on earlier papers in units of the fold spread, shrunk by
-# folds / (folds + skill_prior_folds).
+# Weight of component m for topic x: quality * reliability * exp(skill_temperature * skill) * gate(x).
+# quality reflects the component's inputs (mapping and parse confidence, known marks, missing
+# years); reliability is exams / (exams + parameters estimated from this course); skill is the
+# component's gain over the average member on earlier papers in units of the fold spread, shrunk
+# by folds / (folds + skill_prior_folds).
 skill_temperature = 2.0
 skill_prior_folds = 3.0
 min_metric_sd = 0.05
@@ -221,8 +222,8 @@ replace_confidence = 0.95
 
 [calibration]
 # Probabilities are shown only when calibration fitted on earlier papers beat the base rate on
-# later papers (nested Brier score) by more than one standard error across papers. There is no
-# fixed row count: with few papers the standard error is large and scores stay relative.
+# later papers (nested Brier score) beyond a one-sided 95% t-bound of the per-paper gains. There
+# is no fixed row count: with few papers the bound is wide and scores stay relative.
 # Platt scaling and isotonic regression are compared by nested log loss.
 methods = ["platt", "isotonic"]
 bootstrap_samples = 200

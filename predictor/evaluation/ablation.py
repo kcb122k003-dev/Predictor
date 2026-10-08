@@ -9,9 +9,10 @@ components, with weights learned exactly as in the full model):
 and leave-one-component-out from the full ensemble. Every row reports Hit@1/3/5,
 Recall@K, Precision@K and NDCG@K on topics, recall@K on concepts (finest syllabus level)
 and recall of exactly repeated questions, with the paired change against the previous stage
-and its standard error. A change within about one standard error is not a reliable
-difference, and with few papers most changes are within it; the table says so instead of
-claiming an improvement.
+and its standard error. A change is called reliable only when it lies outside a two-sided
+95% t-interval of the paired per-paper differences; with few papers most changes do not, and
+the table says so instead of claiming an improvement. Reliable gains and reliable losses are
+listed separately.
 
 A separate check scores the final model with and without the syllabus filter against the
 filtered ground truth.
@@ -25,6 +26,7 @@ from typing import Any, Callable
 import numpy as np
 
 from ..models.base import ModelContext
+from ..models.calibration import t_bound
 from ..temporal.panel import Panel
 from .metrics import mean_and_se, ranking_metrics
 
@@ -77,7 +79,8 @@ def _row(label: str, folds: dict[int, dict[str, float]], previous: dict[int, dic
         row["delta"], row["delta_se"] = _r(d), _r(se)
         row["folds_better"] = sum(1 for x in diffs if x > 1e-9)
         row["folds_worse"] = sum(1 for x in diffs if x < -1e-9)
-        row["reliable"] = bool(not math.isnan(se) and abs(d) > se) if diffs else False
+        n = len(diffs)
+        row["reliable"] = bool(n >= 2 and not math.isnan(se) and se > 0 and abs(d) > t_bound(n, 0.975) * se)
         for key, vals in extra.items():
             if prev_extra and key in prev_extra:
                 c = [t for t in vals if t in prev_extra[key]]
@@ -144,16 +147,23 @@ def run_ablation(report, concept_report=None, recurrence_fn: Callable[[dict[int,
         row["component"] = m
         leave_one.append(row)
     n = len(targets)
-    reliable = [r["variant"] for r in staged[1:] if r.get("reliable")]
+    better = [r["variant"] for r in staged[1:] if r.get("reliable") and r["delta"] > 0]
+    worse = [r["variant"] for r in staged[1:] if r.get("reliable") and r["delta"] < 0]
     note = ("Each stage adds components to the evidence-aware ensemble; 'Change' is the paired NDCG difference "
-            "against the previous stage over the same held-out papers, with its standard error. ")
+            "against the previous stage over the same held-out papers, with its standard error. A change counts as "
+            "reliable only outside a two-sided 95% t-interval. ")
     if n < 5:
         note += (f"With {n} held-out paper(s) the standard errors are large, so these differences show direction only "
                  f"and do not establish that a stage helps.")
-    elif reliable:
-        note += "Stages whose change exceeds one standard error: " + ", ".join(reliable) + "."
+    elif better or worse:
+        parts = []
+        if better:
+            parts.append("reliably better: " + ", ".join(better))
+        if worse:
+            parts.append("reliably worse: " + ", ".join(worse))
+        note += "On these papers, " + "; ".join(parts) + ". Every other change is within the noise."
     else:
-        note += "No stage changed NDCG by more than one standard error on these papers."
+        note += "No stage changed NDCG reliably on these papers; every change is within the noise."
     return {"available": True, "metric": f"ndcg@{k}", "k": k, "folds": n, "staged": staged, "leave_one_out": leave_one,
             "metrics": METRICS, "note": note}
 

@@ -113,9 +113,11 @@ def test_one_se_rule_prefers_simpler(settings, planted_panel):
     assert rep.models[name].complexity <= rep.models[best_name].complexity
     name, best_name, reason = select_model(rep.models, "ndcg", "best", rep.targets)
     assert name == best_name and "highest mean" in reason
-    # The final model is the ensemble unless a single method is better by more than one standard error.
+    # The final model is the ensemble unless the out-of-sample best-single selector beat it beyond the
+    # one-sided 95% t-bound.
+    assert rep.selected in ("ensemble", "best_single")
     if rep.selected != "ensemble":
-        assert "more than one standard error" in rep.selection_reason
+        assert "beyond the one-sided 95% bound" in rep.selection_reason
 
 
 def test_leakage_audit_catches_a_leaky_model(settings, planted_panel):

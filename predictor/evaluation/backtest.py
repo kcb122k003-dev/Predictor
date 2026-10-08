@@ -6,9 +6,10 @@ produces the real forecast. Meta models (tuned decays, the evidence-aware ensemb
 using only folds before t. No model needs a minimum number of exams: with two papers there
 is one fold, with fifteen there are fourteen, and the report says how much that is worth.
 
-The evidence-aware ensemble is the final ranking unless a single method beat it on the
-backtest by more than one standard error of the paired difference; then that method is
-used and the report says so. Baselines are always scored on the same folds.
+The evidence-aware ensemble is the final ranking unless "best single method chosen on
+earlier papers" (an out-of-sample selector) beat it on the same held-out papers beyond a
+one-sided 95% t-bound of the paired differences; then that selector's choice is used and
+the report says so. Baselines are always scored on the same folds.
 """
 
 from __future__ import annotations
