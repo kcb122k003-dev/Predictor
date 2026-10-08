@@ -221,3 +221,74 @@ def test_input_quality_changes_component_reliability(fast_settings):
     assert b["reliability"]["logistic"] < a["reliability"]["logistic"]
     assert b["reliability"]["general"] == a["reliability"]["general"]  # outside knowledge is unaffected
     assert "mapping confidence 20%" in b["input_note"]["semantic"]
+
+
+def _report(name: str, role: str, folds: dict[int, float]):
+    from predictor.evaluation.backtest import ModelReport
+
+    r = ModelReport(name=name, display=name, family="test", complexity=1, enabled=True, gate_reason="", hidden=False,
+                    meta=True, role=role)
+    r.fold_metrics = {t: {"ndcg": v} for t, v in folds.items()}
+    r.mean = {"ndcg": float(np.mean(list(folds.values())))}
+    return r
+
+
+def test_selection_does_not_replace_the_ensemble_on_noise(fast_settings):
+    """When the ensemble and the best-single selector are equally good, the ensemble is replaced at about the
+    one-sided 5% rate of the t-bound, not whenever best_single happens to score higher."""
+    from predictor.evaluation.backtest import select_final
+
+    rng = np.random.default_rng(0)
+    replaced = 0
+    trials = 400
+    for _ in range(trials):
+        targets = list(range(1, 6))
+        ens = dict(zip(targets, rng.normal(0.7, 0.05, 5)))
+        best = dict(zip(targets, rng.normal(0.7, 0.05, 5)))
+        reports = {"ensemble": _report("ensemble", "ensemble", ens), "best_single": _report("best_single", "meta", best)}
+        replaced += select_final(reports, "ndcg", targets, fast_settings)[0] == "best_single"
+    assert replaced / trials < 0.08
+    # A consistent, large advantage does replace it.
+    targets = list(range(1, 9))
+    ens = {t: 0.60 + 0.01 * (t % 3) for t in targets}
+    best = {t: 0.75 + 0.01 * (t % 2) for t in targets}
+    reports = {"ensemble": _report("ensemble", "ensemble", ens), "best_single": _report("best_single", "meta", best)}
+    choice, _, reason = select_final(reports, "ndcg", targets, fast_settings)
+    assert choice == "best_single" and "beyond the one-sided 95% bound" in reason
+
+
+def test_calibration_rejects_scores_unrelated_to_outcomes(fast_settings):
+    """Scores that carry no information must almost never be presented as validated probabilities."""
+    from predictor.models.calibration import calibrate
+
+    settings = fast_settings.merged({"calibration": {"bootstrap_samples": 0}})
+    rng = np.random.default_rng(1)
+    valid = 0
+    trials = 60
+    for _ in range(trials):
+        Y = (rng.random((10, 20)) < 0.4).astype(float)
+        preds = {t: rng.random(20) for t in range(1, 10)}
+        valid += calibrate(preds, Y, list(range(1, 10)), settings).valid
+    assert valid / trials <= 0.05
+    # Informative scores on enough papers do validate.
+    Y = (rng.random((12, 20)) < 0.4).astype(float)
+    preds = {t: Y[t] + rng.normal(0, 0.35, 20) for t in range(1, 12)}
+    assert calibrate(preds, Y, list(range(1, 12)), settings).valid
+
+
+def test_without_simulated_prior_the_general_model_is_reported_unavailable(fast_settings):
+    """models.use_simulated_prior = false and no other real course: no outside knowledge exists, so the general
+    component says so and the ensemble reweights the rest. Nothing else is switched off."""
+    from predictor.inference.generic import flat_prior
+
+    rep = BacktestEngine(planted(6, seed=8), fast_settings, general=flat_prior()).run(audit_leakage=False)
+    info = rep.final_outputs["ensemble"].info
+    assert "general" not in info["weights"] and "general" in info["excluded"]
+    assert abs(sum(info["weights"].values()) - 1.0) < 1e-3
+    assert info["weights"]["semantic"] > 0 and info["weights"]["beta_binomial"] > 0
+    profile = build_profile(rep.ctx.panel, questions=10, questions_total=10, questions_with_marks=10,
+                            syllabus_weights="uniform", pretrained=True, pretrained_note="", repository_courses=0,
+                            report=rep)
+    rows = {r["model"]: r for r in component_status(rep, profile)}
+    assert rows["general"]["status"] == "UNAVAILABLE"
+    assert rows["semantic"]["status"] in ("ACTIVE", "LIMITED")

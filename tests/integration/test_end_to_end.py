@@ -206,3 +206,38 @@ def test_evidence_report_and_uncertainty(analysed_demo):
         "Frequency only", "+ recency", "+ Bayesian smoothing"]
     for key in ("hit@1", "hit@3", "hit@5", "recall", "precision", "ndcg", "concept_recall", "exact_recurrence_recall"):
         assert key in ablation["staged"][-1], key
+
+
+def test_course_with_a_syllabus_and_no_papers_still_gets_a_ranking(tmp_path, demo_files):
+    """Zero papers: no history exists, so the ranking comes from the general model and the syllabus structure,
+    every topic carries the full rank range as its uncertainty, and nothing claims to be validated."""
+    from predictor.services.analysis_service import AnalysisService
+    from predictor.services.context import AppContext
+    from predictor.services.course_service import CourseService
+    from predictor.services.ingest_service import IngestService
+    from predictor.services.results_service import ResultsService
+
+    folder, _ = demo_files
+    app = AppContext.create(tmp_path / "data", log=False)
+    ingest = IngestService(app)
+    cid = CourseService(app).create("Syllabus only")
+    for path in sorted((folder / "syllabus").iterdir()):
+        res = ingest.add_file(cid, path, path.name, "syllabus")
+        ingest.process_file(res.file_id)
+    service = AnalysisService(app)
+    run_id = service.create_run(cid)
+    summary = service.run(run_id)
+    assert summary["exams"] == 0 and summary["questions"] == 0
+    results = ResultsService(app)
+    preds = results.predictions(run_id)
+    K = len(preds)
+    assert K == summary["topics"] > 0
+    assert sorted(p["rank"] for p in preds) == list(range(1, K + 1))
+    for p in preds:
+        assert p["uncertainty"]["rank_low"] == 1 and p["uncertainty"]["rank_high"] == K
+        assert p["uncertainty"]["level"] == "High"
+        assert p["probability"] is None  # no held-out paper, so no calibrated probability
+    ev = results.artifact(run_id, "evidence")
+    assert ev["mode"] == "Low-data advanced inference"
+    assert "disabled" not in ev["message"].lower()
+    app.db.dispose()

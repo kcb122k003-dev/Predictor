@@ -121,3 +121,20 @@ def test_migration_marks_the_old_demo_course_synthetic(tmp_path):
         assert s.get(Course, 1).is_synthetic is True and s.get(Course, 2).is_synthetic is False
         assert s.get(Exam, 1).source == "demo" and s.get(Exam, 2).source == "upload"
     db.dispose()
+
+
+def test_simulated_prior_can_be_turned_off(settings):
+    """With use_simulated_prior off, the general model comes only from other real courses, or does not exist."""
+    db = Database(":memory:")
+    with db.session() as s:
+        a, b = _course(s, "A"), _course(s, "B")
+        gm, info = general_model_for(s, b, use_simulated=False)
+        assert gm.source == "none" and info["real_courses"] == 0
+        X, y, _ = panel_rows(planted(10, seed=3), settings)
+        save_course_features(s, a, None, "topic", X, y, 10, is_synthetic=False)
+        gm, info = general_model_for(s, b, use_simulated=False)
+        assert gm.source == "repository" and info["real_courses"] == 1
+        with_sim, _ = general_model_for(s, b, use_simulated=True)
+        assert with_sim.source == "simulation+repository"
+        keys = {r.fingerprint for r in s.execute(select(ModelRegistry).where(ModelRegistry.scope == "global")).scalars()}
+        assert len(keys) == 3  # one registry row per distinct general model used
