@@ -22,21 +22,24 @@ nothing needs an internet connection after installation.
    the current syllabus never drive a prediction; they are listed separately with the reason.
 4. **Tests prediction methods on your own history.** Each past paper from the second onward is
    predicted using only the papers before it. Nothing switches off because a course is small:
-   there is no minimum number of papers for testing or for any of the thirteen components. They
-   include recency-frequency, hierarchical Bayesian recurrence, semantic
-   evidence from a bundled pretrained model, syllabus coverage, a general ranking model trained on
+   there is no minimum number of papers for testing or for any of the thirteen components. A
+   course with only a syllabus and no papers can be analysed too: the ranking then comes from the
+   syllabus structure and the general model, and every topic gets the full rank range. The
+   components include recency-frequency, hierarchical Bayesian recurrence, semantic evidence
+   from a bundled pretrained model, syllabus coverage, a general ranking model trained on
    simulated courses, a course-specific logistic model pulled toward that general model, and
    Markov, HMM and tree models. An evidence-aware ensemble weights each one by how much evidence
    supports it and how well it ranked earlier papers. The app marks each component ACTIVE, LIMITED,
    DOWNWEIGHTED, UNAVAILABLE (an input it needs does not exist) or REFERENCE (a baseline kept for
-   comparison). A single method replaces the ensemble only if it beat the ensemble on earlier
-   papers by more than one standard error.
+   comparison). The ensemble stays the final ranking unless the best single method chosen on
+   earlier papers (picked again before each held-out paper) beat it on the same held-out papers
+   beyond a one-sided 95% t-bound of the paired differences (`ensemble.replace_confidence`).
 5. **Explains every prediction.** Recent and total appearances, gaps, how often topics in this
    course reappear after a given gap, marks, formats, signal contributions, and "why not" notes
    for low-ranked topics. Each topic also shows a rank range, an uncertainty level and an evidence
    strength, because a high score does not mean the app is certain. Percentages are shown as
-   probabilities only when calibration beat the base rate on later held-out papers by more than one
-   standard error; otherwise you see relative scores.
+   probabilities only when the calibrated Brier score beat the base rate on later held-out papers
+   beyond a one-sided 95% t-bound; otherwise you see relative scores.
 6. **Suggests grounded question formulations and practice papers**, built from your course's own
    wording and syllabus phrases. It never invents numbers for numerical questions. Topics are
    ranked first, and each formulation must pass syllabus, topic, semantic and question-type checks
@@ -74,36 +77,44 @@ Install Tesseract for scanned papers: `sudo apt install tesseract-ocr` (Ubuntu/D
 
 ## What results look like on the demo course
 
-12 synthetic papers, 144 questions, 25 syllabus topics, analysed in about 10 seconds on a
+12 synthetic papers, 144 questions, 25 syllabus topics, analysed in about 9 seconds on a
 4-core machine. The scores below compare each method's ranking with the topics the app itself
 mapped the held-out questions to, which is all a real course can measure:
 
-| Method | NDCG@11 on 11 held-out papers |
+| Method | NDCG@11 on 11 held-out papers (mean ± SE) |
 |---|---:|
-| General ranking model (cross-course) | 0.758 |
-| **Evidence-aware ensemble (final ranking)** | **0.754** |
-| Semantic evidence (pretrained) | 0.749 |
-| Hierarchical Bayesian recurrence | 0.724 |
-| Recent-window frequency | 0.720 |
-| Most frequent topics | 0.709 |
-| Random selection (exact expectation) | 0.460 |
+| General ranking model (cross-course) | 0.730 ± 0.022 |
+| **Evidence-aware ensemble (final ranking)** | **0.717 ± 0.027** |
+| Semantic evidence (pretrained) | 0.712 ± 0.021 |
+| Best single method chosen on earlier papers | 0.707 ± 0.022 |
+| Recent-window frequency | 0.687 ± 0.017 |
+| Most frequent topics | 0.678 ± 0.024 |
+| Hierarchical Bayesian recurrence | 0.673 ± 0.026 |
+| Random selection (exact expectation) | 0.456 |
 
-Against the generator's planted true topics, which the app cannot see, the ensemble is level with
-plain frequency (slightly lower, within one standard error), so the demo does not show a gain
-there. The gains over frequency are measured on simulated courses; see
-[Low-data inference](docs/LOW_DATA_INFERENCE.md#8-results).
+Against these labels the ensemble beat plain frequency by +0.039 ± 0.019 (better on 9 of 11
+papers). Against the generator's planted true topics, which the app cannot see, the difference is
++0.004 ± 0.017, so the demo shows no improvement over frequency there. Part of the gain against
+mapped labels comes from the semantic component, which shares the alignment's systematic choices.
+On simulated courses with known outcomes, in-sample backtests put the ensemble 0.016-0.08 above
+frequency at 3-20 papers. Scored strictly on the next paper, the gain is small: -0.008 to +0.032.
+See [Low-data inference](docs/LOW_DATA_INFERENCE.md#8-results).
 
-* The general model's small lead over the ensemble is within one standard error (0.013), so the
-  app keeps the ensemble.
-* Syllabus alignment put 127 of 140 in-syllabus questions (90.7%) on the right topic with the
-  default hybrid of the pretrained model and TF-IDF (TF-IDF alone: 128). All 4 questions from an old
-  syllabus were marked "outside" and none of the 140 in-syllabus questions was.
-* In the staged ablation, only two steps improved NDCG by more than one standard error: adding
-  Bayesian smoothing to frequency and recency, and the step to the full ensemble. The other steps changed it by
-  less than 0.01, and the app labels them "not reliable" instead of hiding them.
-* With 12 papers the run reports "Low-data advanced inference": the course logistic and tree models
-  run as LIMITED with 2-3% of the weight each.
-* Calibrated probabilities beat the base rate on 10 later held-out papers (Brier 0.182 vs 0.249).
+* The general model alone scored highest, but you can only pick it in hindsight. The app compares
+  the ensemble with the best single method chosen on earlier papers: the ensemble led by
+  +0.010 ± 0.018, so it stays the final ranking.
+* Syllabus alignment put 131 of 140 in-syllabus questions (93.6%) on the right topic with the
+  default hybrid of the pretrained model and TF-IDF. When it aligns a paper, the feedback pass uses
+  questions from earlier papers only. All 4 questions from an old syllabus were marked "outside" and
+  none of the 140 in-syllabus questions was.
+* In the staged ablation, only adding semantic evidence changed NDCG reliably (+0.052 ± 0.019,
+  outside the two-sided 95% t-interval). The app labels the other steps "not reliable" instead of
+  hiding them; adding recency to frequency, for example, lowered NDCG by 0.015 ± 0.008.
+* With 12 papers the run reports "Low-data advanced inference": the course logistic, random forest
+  and gradient boosting models run as LIMITED with 2-4% of the weight each. The label is wording
+  only; it switches nothing on or off.
+* Calibrated probabilities beat the base rate on 10 later held-out papers: Brier 0.191 vs 0.248,
+  a gain of 0.057 ± 0.005.
 
 Your own course will give different numbers; the Model performance page shows them.
 
@@ -164,10 +175,14 @@ pytest                    # unit, integration and regression tests (several minu
 * With one held-out paper the app cannot measure accuracy, and with fewer than about five the
   confidence interval is wider than most differences between methods. The app still ranks topics,
   shows wide rank ranges and says so.
-* On the demo course the ensemble does not beat plain frequency against the planted true topics.
-  Gains are measured on simulated courses, which are only as realistic as their generators.
+* On the demo course the ensemble does not beat plain frequency against the planted true topics
+  (+0.004 ± 0.017). Gains show up mostly in in-sample backtests on simulated courses, which are
+  only as realistic as their generators; next-paper gains there are small.
 * The general ranking model is trained on simulations. Until your library holds other real
-  courses, it reflects generic examiner behaviour, not your institution's.
+  courses, it reflects generic examiner behaviour, not your institution's. Set
+  `models.use_simulated_prior = false` (or clear "Use the simulated cross-course prior" in
+  Settings) to drop the simulations: the general model then learns only from other real courses
+  in your library, and with none it is UNAVAILABLE and the other components share its weight.
 * The bundled pretrained model is a static word-embedding model. It found the right topic for 11 of
   26 reworded test questions, fewer than character n-grams (14), so reworded repeats are matched
   by character n-grams and word overlap unless you download a sentence-transformer.

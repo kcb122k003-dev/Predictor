@@ -72,11 +72,14 @@ course is marked as synthetic, so its papers are never used to train the cross-c
 described in section 3.
 
 The demo also shows the limits of what a 12-paper course can prove. Scored against the app's own
-topic labels, the final ranking reaches 0.754 on the backtest, against 0.709 for simply ranking
-topics by how often they appeared (the score is NDCG, where 1 is a perfect ranking). Scored against
-the topics the generator really planted, which you can never know for a real course, it does not
-beat plain frequency (about 0.73 against 0.745, a difference within one standard error). The gains
-over frequency are shown on simulated courses.
+topic labels, the final ranking reaches 0.717 on the backtest, against 0.678 for simply ranking
+topics by how often they appeared (the score is NDCG, where 1 is a perfect ranking). That is a
+difference of +0.039 ± 0.019 over 11 held-out papers. Scored against the topics the generator
+really planted, which you can never know for a real course, the final ranking scores 0.738 and
+plain frequency 0.734, a difference of +0.004 ± 0.017. So the demo shows no improvement over
+frequency on the planted topics. Part of the gain against the app's labels comes from semantic
+evidence, which shares the mapping's systematic choices. Gains over frequency show up mainly in
+backtests on simulated courses, and they are small when you score only the next unseen paper.
 [docs/LOW_DATA_INFERENCE.md](LOW_DATA_INFERENCE.md) has the full measurements.
 
 Your data lives in `~/ExamPredictorData` (change it with `predictor --data-dir PATH serve`).
@@ -84,7 +87,9 @@ Back up that folder to keep your courses.
 
 If you used an earlier version, the app upgrades your database when it starts. It only adds new
 columns and tables; nothing is deleted. Run the analysis again to get the inference status, rank
-ranges and evidence strength, which older runs do not have.
+ranges and evidence strength, which older runs do not have. Until you do, the predictions page of
+an older run shows a banner: "These results were produced by an earlier version of the engine.
+Press Analyze & Predict ..."
 
 ## 3. Creating a course
 
@@ -96,7 +101,8 @@ The one shared part is the general ranking model (section 9). After each analysi
 the app stores that course's pattern rows: scale-free numbers such as recency rates and gaps, with
 no topic names or raw counts. The general model used for any other course is the shipped model
 updated with these rows. A course never learns from its own rows this way, and courses marked as
-synthetic, such as the demo, are never used.
+synthetic, such as the demo, are never used. If you switch off the simulated prior (section 14),
+the general model is learned from these rows alone.
 
 ## 4. Uploading past papers
 
@@ -207,11 +213,15 @@ What happens:
 6. **Evidence-aware ensemble.** The components are combined into one ranking. A component's weight
    depends on its reliability (the number of papers compared with the number of parameters it
    estimates from your course) and on how well it ranked your earlier papers. Topics with little
-   history of their own lean more on these outside-knowledge components. The ensemble is the final
-   ranking unless a single method beat it on the backtest by more than one standard error. In that
-   case the simplest method within one standard error of the best is used, and the page says so.
+   history of their own lean more on the components that bring outside knowledge (the general
+   model, semantic evidence and syllabus coverage). The app also backtests a
+   simpler rival: for each held-out paper it uses whichever single method ranked the papers before
+   it best. The ensemble is the final ranking unless that rival beat it on the same papers by a
+   clear margin, beyond a one-sided 95% bound on the paired differences. Only then is a single
+   method used (the one that ranked your past papers best), and the page says so.
 7. **Calibration.** Two calibration methods are tested on the held-out papers. Scores become
-   probabilities only if calibration passes that test (section 10).
+   probabilities only if the calibrated scores beat the base rate on later papers beyond a
+   one-sided 95% bound (section 10).
 8. **Uncertainty.** Each topic gets a rank range and an evidence strength.
 9. Explanations, question formulations (each checked before it is shown), structure analysis and
    practice papers are produced.
@@ -219,9 +229,10 @@ What happens:
 Nothing switches off because a course is small. There is no minimum number of papers for
 backtesting or for any model: every component runs on every held-out paper, and the evidence
 behind it sets its weight. A component is marked UNAVAILABLE only when an input it needs does not
-exist, for example co-occurrence before two consecutive papers exist. Below about 20 papers, the
-models learned from your course still have uncertain parameters, and the predictions page tells you
-so, for example:
+exist, for example co-occurrence before two consecutive papers exist. You can even analyse a course
+that has a syllabus and no past papers yet (section 15). Until you have more papers than the models
+learned from your course have parameters to estimate (about 25 papers for a course like the demo),
+those parameters stay uncertain, and the predictions page tells you so, for example:
 
 > Only 5 historical examinations are available. Advanced semantic and Bayesian inference remains
 > active, but course-specific learned ranking parameters have high uncertainty.
@@ -232,8 +243,9 @@ component, how the weights are computed and what the measurements show.
 ## 10. Understanding the predictions
 
 **Inference status.** The card at the top names the mode: *Low-data advanced inference* while the
-models learned from your course are still uncertain (below about 20 papers), and *Advanced
-inference* after that. Two badges show the overall **evidence quality** (the typical evidence
+most reliable model learned from your course has a reliability below 0.5 (about 25 papers for a
+course like the demo), and *Advanced inference* after that. The label is wording only: it switches
+nothing on or off. Two badges show the overall **evidence quality** (the typical evidence
 strength of the topics in the top half of the ranking) and the **prediction uncertainty** (the most
 common rank uncertainty level among the topics). Under the message you find the validation summary
 and notes about your data, such as papers without a year or missing calendar years. Open
@@ -250,9 +262,9 @@ estimated from this course), its status, its weight in the ensemble and the reas
 
 **Summary cards** show how many papers were analysed, how many questions fell inside the syllabus,
 which method produced the final ranking (normally the evidence-aware ensemble) and whether
-percentages are calibrated. **Why this ranking** compares the ensemble with the best single method
-on your held-out papers, with the standard error of the difference, and gives the calibration
-result.
+percentages are calibrated. **Why this ranking** compares the ensemble on your held-out papers
+with the best single method chosen on earlier papers, gives the standard error of the difference
+and states the calibration result.
 
 **Priority categories**
 
@@ -270,35 +282,41 @@ behind it, for example "5/12 papers, 7 questions"), when it last appeared, its l
 range and syllabus match, its rank range, its evidence strength and a confidence label.
 
 **Rank range.** The positions the topic could plausibly take with the papers you have. The app
-ranks the topics again with each past paper left out in turn, and again with the Bayesian
-estimates redrawn from their uncertainty (the middle 80% of those draws is used). The rank range is
-the wider of the two results. Its uncertainty level is Low when it spans less than a fifth of the
-topics, Medium below two fifths and High otherwise. A topic at rank 2 with a range of 1 to 9 could
-plausibly end up anywhere in the top nine.
+ranks the topics again with each past paper left out in turn, and again 200 times with the
+Bayesian estimates and the ensemble weights redrawn from their uncertainty (the middle 80% of those
+draws is used). The rank range covers both results. Its uncertainty level is Low when it spans less
+than a fifth of the topics, Medium below two fifths and High otherwise. A topic whose estimate
+still rests mostly on the prior is at least Medium, or High when its papers have narrowed the
+estimate very little. A topic at rank 2 with a range of 1 to 9 could plausibly end up anywhere in
+the top nine. With no past papers, every topic shows the full range and High uncertainty.
 
-**Evidence strength** shows how much of the Bayesian estimate comes from your course's own papers
-rather than from the prior (the rates of the topic's unit and of the whole course):
+**Evidence strength** shows how much your papers have narrowed the Bayesian estimate for this
+topic. The app compares the uncertainty left after seeing your papers (posterior variance) with the
+uncertainty before (prior variance, from the rates of the topic's unit and of the whole course):
 
-| Evidence strength | Share of the estimate from the prior |
+| Evidence strength | Uncertainty left, as a share of the prior uncertainty |
 |---|---|
 | Strong | under 30% |
 | Moderate | 30% to 50% |
 | Limited | 50% to 75% |
 | Minimal | 75% or more |
 
-That share depends on how many papers you have and on the recency discount, not on the individual
-topic, so every topic in one run shows the same label. The one-line evidence summary in each
-topic's details does differ by topic: it says in how many papers, and with how many questions, the
-topic itself appeared.
+The label differs by topic. A topic that was absent from many papers can have strong evidence: you
+then know well that it is rarely tested. The one-line evidence summary in each topic's details says
+in how many papers, and with how many questions, the topic itself appeared.
 
 A high score does not mean high certainty. A topic can rank near the top and still have a wide rank
 range. Check the rank range and evidence strength before you skip anything.
 
 **Percentages.** Percentages are probabilities only when the card says *Calibrated*. The app tests
 two calibration methods (Platt scaling and isotonic regression): each is fitted on earlier held-out
-papers and checked on later ones. Calibration is accepted only if it predicts the later papers
-better than the base rate by more than one standard error. With three papers or fewer it cannot
-pass, because it needs at least two later papers to check against. When the card says
+papers and checked on later ones, and the method used for each later paper is the one that did
+better on the papers before it. Calibration is accepted only if it predicts the later papers better
+than the base rate (the overall share of topics that appear) beyond a one-sided 95% bound: the
+average gain in Brier score must exceed its standard error times the t-value for that many papers.
+With three papers or fewer it cannot pass, because it needs at least two later papers to check
+against. On the demo it passes: Brier 0.191 against 0.248 for the base rate over 10 later papers
+(gain 0.057 ± 0.005). When the card says
 *Calibrated*, a topic shown at 70% appeared in about 70% of similar cases in held-out papers, and
 the range (for example 66% to 74%) shows how precisely that is known. When it says *Relative
 scores*, the number is the topic's position in the ranking on a 0 to 1 scale. Use it to order
@@ -389,11 +407,15 @@ on:
 recency, Bayesian smoothing, semantic evidence, topic structure (coverage, question type,
 co-occurrence), temporal dynamics and finally the full ensemble. Each row gives the ranking score
 (NDCG), Hit@1, Hit@3, Hit@5, recall, precision, concept recall and recall of exactly repeated
-questions, plus the paired change against the previous stage with its standard error. A change
-within one standard error is labelled *not reliable*. With fewer than five held-out papers, the note
-above the table says the differences show direction only. A second table removes one component at a
-time from the full ensemble. With a single paper there is no held-out paper, so no ablation is
-shown. On the demo course, most of the stages change the score by less than one standard error.
+questions, plus the paired change against the previous stage with its standard error. A change is
+reliable only when it falls outside a two-sided 95% interval of the per-paper differences; with 11
+held-out papers that means more than about 2.2 standard errors away from zero. Every other change
+is labelled *not reliable*. The note above the table lists reliable gains and reliable losses
+separately. With fewer than five held-out papers, it says the differences show direction only. A
+second table removes one component at a time from the full ensemble. With a single paper there is
+no held-out paper, so no ablation is shown. On the demo course, only adding semantic evidence is a
+reliable gain (+0.052 ± 0.019). No stage is a reliable loss, and every other change is within the
+noise.
 
 ## 12. Search
 
@@ -422,14 +444,18 @@ From the command line: `predictor export RUN_ID --format pdf --out report.pdf`.
 | Setting | What it changes |
 |---|---|
 | Syllabus strictness | which mapping statuses count (see section 8) |
-| Clearly-in / probably-in / outside thresholds | the match scores behind A, B and D when the `tfidf` backend is used. The default hybrid backend reads its own thresholds, `alignment.thresholds.hybrid` (same default values), which are not on this page |
+| Clearly-in / probably-in / outside thresholds | the match scores behind A, B and D for the default hybrid backend. The `tfidf` and `sentence-transformers` backends read their own thresholds (`alignment.thresholds.tfidf` and `alignment.thresholds.neural`), which are not on this page |
 | Top-K for evaluation | how many topics the backtest scores; `auto` uses the typical number per paper |
-| Papers before the first backtest target | how many papers come before the first held-out paper. The default, 1, tests every paper after the first; a larger value only removes held-out papers. No model needs a minimum |
-| Model selection rule | no longer used. The ensemble is the final ranking unless a single method beats it by more than one standard error; then the simplest method within one standard error of the best is chosen |
-| Recency half-life | the default decay of the recency-frequency component (kept unless another decay does reliably better on earlier papers), the recency-weighted importance chart and the question-format mix. The Bayesian recurrence chooses its own discount on earlier papers |
-| Logistic regularisation C | no longer used. `models.course_prior_precision` sets how closely the course-specific logistic model stays to the general model |
+| First held-out paper | how many papers come before the first held-out paper. The default, 1, tests every paper after the first; a larger value only removes held-out papers. No model needs a minimum |
+| Default recency half-life (papers) | the default decay of the recency-frequency component (kept unless another decay is ahead on earlier papers beyond a one-sided 95% bound), the recency-weighted importance chart and the question-format mix. The Bayesian recurrence chooses its own discount on earlier papers |
+| Ensemble skill temperature | how strongly a component's skill on earlier papers moves its weight (default 2) |
+| Course model pull toward the general model | how closely the course-specific logistic model stays to the general model (`models.course_prior_precision`, default 2) |
+| Use the simulated cross-course prior | on by default: the general ranking model starts from simulated examiner behaviour and is updated with your other real courses. Turn it off and no simulated knowledge is used. Until another real (not synthetic) course is in your library, the general model then shows UNAVAILABLE, the other components share its weight and the course-specific logistic model is no longer pulled toward it. Once other real courses exist, the general model is learned from them alone |
 | OCR language, resolution, page segmentation, deskew | text extraction from scans |
-| Embedding backend | how questions are matched to the syllabus (see below) |
+| Embedding backend, neural model name | how questions are matched to the syllabus (see below) |
+
+Settings files from older versions still load. Keys that no longer do anything, such as the old
+model selection rule and logistic regularisation C, are ignored.
 
 **Embedding backend**
 
@@ -440,27 +466,28 @@ From the command line: `predictor export RUN_ID --format pdf --out report.pdf`.
 | `tfidf` | word matching only, for mapping questions to the syllabus. The pretrained model still provides semantic evidence and checks generated questions |
 | `sentence-transformers` | the larger model from section 1. If it is not downloaded, the app uses `hybrid` (or `tfidf`) and says so in the run |
 
-On the demo course, `hybrid` puts 127 of 140 in-syllabus questions on the right topic and `tfidf`
-128, and both mark all four old-syllabus questions as outside. So the hybrid does not map more
-demo questions correctly. It adds general language knowledge while keeping the separation between
-in-syllabus and out-of-syllabus questions that the pretrained model alone does poorly.
+On the demo course, `hybrid` and `tfidf` each put 131 of 140 in-syllabus questions on the right
+topic, and both mark all four old-syllabus questions as outside (both measured with feedback from
+earlier papers only). `tfidf` leaves 9 questions at status C (uncertain), against 6 for `hybrid`.
+The hybrid is not shown to map more demo questions correctly. It adds general language knowledge
+while keeping the separation between in-syllabus and out-of-syllabus questions that the
+pretrained model alone does poorly.
 
 **Settings that are not on the page.** Add them to `settings.json` in your data folder, using the
 same names and nesting as `predictor/config/default.toml`, then restart the app. For example:
 
 ```json
-{"ensemble": {"skill_temperature": 2.0, "gate_strength": 1.0}}
+{"ensemble": {"gate_strength": 1.0, "replace_confidence": 0.95}}
 ```
 
 | Setting | Default | What it changes |
 |---|---|---|
-| `ensemble.skill_temperature` | 2.0 | how strongly the skill measured on earlier papers moves the weights |
 | `ensemble.skill_prior_folds` | 3 | how many held-out papers it takes before measured skill counts fully |
+| `ensemble.min_metric_sd` | 0.05 | the smallest fold-to-fold spread used to scale measured skill |
 | `ensemble.gate_strength` | 1.0 | how much more a topic with little history of its own leans on the pretrained, syllabus and cross-course components |
-| `ensemble.replace_if_worse_by_se` | 1.0 | a single method replaces the ensemble only if it beat it by more than this many standard errors |
+| `ensemble.replace_confidence` | 0.95 | the best single method chosen on earlier papers replaces the ensemble only if it beat it beyond this one-sided bound |
 | `embeddings.pretrained` | `wordllama` | `"none"` turns the pretrained model off everywhere |
 | `embeddings.hybrid_pretrained_weight` | 0.3 | the pretrained share of the hybrid similarity |
-| `models.course_prior_precision` | 2.0 | how strongly the course-specific logistic model is pulled toward the general model |
 | `temporal.bayes_half_lives` | [6, 3, 1.5] | recency discounts the Bayesian recurrence tries (plus no discount) |
 | `calibration.methods` | platt, isotonic | calibration methods compared on held-out papers |
 
@@ -477,12 +504,13 @@ the ensemble settings in detail.
 | A paper has no year | enter it in Review; the paper is then included |
 | Questions merged or split wrongly | use Split and Merge in Review |
 | A question is mapped to the wrong topic | click **Change** in Topic mapping; add an alias to the topic so similar wording maps correctly next time |
-| Everything is "Relative scores" | percentages become probabilities only when calibration beats the base rate on later held-out papers by more than one standard error (section 10). With three papers or fewer that cannot happen; with more, it depends on your papers. Relative scores still order the topics: read them with the rank range and evidence strength, and add older papers when you can |
-| You have only one past paper | the analysis still runs. There is no earlier paper to test a prediction against, so accuracy, calibration and the ablation study cannot be measured, and scores are relative. The ranking comes from the general ranking model, semantic evidence, syllabus coverage and Bayesian recurrence, which with one paper leans mostly on its prior. Co-occurrence is UNAVAILABLE until two consecutive papers exist |
+| Everything is "Relative scores" | percentages become probabilities only when calibration beats the base rate on later held-out papers beyond a one-sided 95% bound (section 10). With three papers or fewer that cannot happen; with more, it depends on your papers. Relative scores still order the topics: read them with the rank range and evidence strength, and add older papers when you can |
+| You have no past papers yet | you can still analyse the course with only a syllabus. The ranking comes from the general ranking model and the syllabus structure. Every topic shows the full rank range (1 to the number of topics) and High uncertainty, scores are relative, and the status card says: "No historical examinations are available yet. The ranking uses the syllabus structure and the general cross-course model; every topic has high uncertainty." If you switched off the simulated prior and no other real course is in your library, only the syllabus structure is left to rank the topics |
+| You have only one past paper | the analysis still runs. There is no earlier paper to test a prediction against, so accuracy, calibration and the ablation study cannot be measured, and scores are relative. Every component except co-occurrence runs. No skill can be measured yet, so the weights come from reliability alone: most of the weight goes to the general ranking model, semantic evidence, recency-frequency, Bayesian recurrence (which with one paper leans mostly on its prior) and syllabus coverage, and the models learned from your course get very little. Co-occurrence is UNAVAILABLE until two consecutive papers exist |
 | You have two to five papers | every component runs and is tested on one to four held-out papers. Weights come mostly from each component's reliability, the models learned from your course run with small weights (usually LIMITED), rank ranges are wide and the status card says "Low-data advanced inference". With one held-out paper the accuracy figure is anecdotal, and the 95% interval needs at least two. This is the expected behaviour |
 | A component shows UNAVAILABLE | an input it needs does not exist for this course, and the *Why* column names it. For example, co-occurrence needs two consecutive papers, and question-type fit needs more than one question format or format tags in the syllabus |
 | "The pretrained semantic model is unavailable" | the `wordllama` package is missing or damaged, or `embeddings.pretrained` is set to `"none"`. Run the installer again and check `predictor doctor`. Until then, mapping uses TF-IDF only |
-| "No past papers are included in the analysis" | upload at least one paper, give it a year in Review and leave *Include* ticked |
+| A paper you uploaded is not in the analysis | give it a year in Review and leave *Include* ticked |
 | The browser did not open | go to <http://127.0.0.1:8765> yourself |
 | Port already in use | `predictor serve --port 8800` |
 

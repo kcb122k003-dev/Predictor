@@ -41,10 +41,10 @@ The specification is long, but most of it reduces to five engineering problems:
 
 | # | Tension in the spec | Decision |
 |---|---|---|
-| D1 | "Works fully offline" vs "modern neural embeddings". Pretrained models must be downloaded once, and the download host may be unreachable. | The default embedding backend is a TF-IDF model over word stems plus character n-grams, fitted locally. It needs no download. A neural backend (sentence-transformers) is optional and is enabled only after an explicit `predictor models download` command. The app never downloads anything on its own.<br><br>**Revised in the low-data upgrade:** TF-IDF is no longer the only model that works without a download. The default backend is `auto`: a sentence-transformer if you downloaded one, otherwise a hybrid of the bundled WordLlama model and syllabus-fitted TF-IDF, otherwise TF-IDF alone. WordLlama (256-dimensional static embeddings, MIT licence) ships inside the `wordllama` pip package, so it needs no download and runs at every course size. The hybrid cosine is 0.3 × pretrained + 0.7 × TF-IDF (`embeddings.hybrid_pretrained_weight`). On the demo course the hybrid puts 127 of 140 questions on the right topic (TF-IDF alone: 128) and keeps all 4 old-syllabus questions outside. Repeat detection still uses character n-grams unless a sentence-transformer is installed, because character n-grams found the right topic for more reworded questions (14 of 26, against 11 for WordLlama). The app still downloads nothing on its own. |
-| D2 | "Use Markov, HMM, survival, gradient boosting, calibration" vs "you will often have 5 to 15 exams". A single topic with 10 exams has 10 binary observations. No per-topic model can be fitted on that. | Every learned model is **pooled across topics**: one row per (exam, topic). Ten exams and 40 topics give about 280 training rows after warm-up. Per-topic parameters use empirical-Bayes shrinkage toward the pooled estimate. Complex models are gated by data-sufficiency rules and must also win the backtest.<br><br>**Revised in the low-data upgrade:** the data-sufficiency gates (`models.sufficiency`) were removed and no other threshold replaced them. Every component runs on every backtest fold at every course size. Instead of a gate, each component gets a reliability prior, papers / (papers + parameters it estimates from this course), and its ensemble weight also depends on how well it ranked earlier papers. A component reports "unavailable" only when an input it needs does not exist. Pooling stays: the hierarchical Bayesian recurrence pools at course, unit and topic level, and the course logistic model is pulled toward a general ranking model trained on simulated courses. A component no longer has to win the backtest to contribute. Old settings files that still contain `models.sufficiency` load normally and the key is ignored. See section 3 and [Low-data inference](LOW_DATA_INFERENCE.md#2-what-replaced-the-cutoff). |
-| D3 | "Calibrated probabilities" vs tiny validation sets. Isotonic regression on 200 points overfits. | Platt scaling (two parameters) on the percentile rank of each topic, fitted only on out-of-sample backtest predictions. Probabilities are shown only when nested calibration beats the base-rate Brier score. Otherwise the UI shows "relative score" and says why.<br><br>**Revised in the low-data upgrade:** Platt scaling and isotonic regression now compete. For each held-out paper, each calibrator is fitted on earlier held-out papers only, and the one with the lower nested log loss is used. The fixed row and positive-count minimums (`calibration.min_rows`, `calibration.min_positives`) were removed. Probabilities are shown only when the nested Brier score beats the base rate by more than one standard error of the per-paper difference. With few papers that standard error is large, so you see relative scores with a rank interval and an evidence strength instead. |
-| D4 | Backtests on very few exams. With 5 exams and 3 warm-up exams you get 2 folds; a metric averaged over 2 folds is close to noise. | The backtest reports the standard error for every metric and the number of folds. Model selection uses the one-standard-error rule, which prefers the simpler model when the gap is inside the noise. Below 4 exams, no backtest runs and the app uses transparent statistics only.<br><br>**Revised in the low-data upgrade:** there is no minimum number of exams for backtesting. The backtest is rolling-origin over every fold: with T papers, papers 2 to T are each predicted from the papers before them, which gives T − 1 folds (`models.min_train_exams` defaults to 1). One paper gives no fold, and the app says accuracy cannot be measured yet. Each report gives the number of folds, the fold-to-fold standard deviation, a 95% t-interval for the mean metric, and paired comparisons with random, frequency, recency-frequency and Bayesian recurrence. The one-standard-error rule is no longer the main selection rule. The evidence-aware ensemble is the final ranking unless a single method beat it by more than one standard error of the paired difference; only then does the one-SE rule pick the simplest method within one standard error of the best. Tuned variants (decay, window, half-life) keep their default unless another variant is ahead by more than one standard error on earlier folds. |
+| D1 | "Works fully offline" vs "modern neural embeddings". Pretrained models must be downloaded once, and the download host may be unreachable. | The default embedding backend is a TF-IDF model over word stems plus character n-grams, fitted locally. It needs no download. A neural backend (sentence-transformers) is optional and is enabled only after an explicit `predictor models download` command. The app never downloads anything on its own.<br><br>**Revised in the low-data upgrade:** TF-IDF is no longer the only model that works without a download. The default backend is `auto`: a sentence-transformer if you downloaded one, otherwise a hybrid of the bundled WordLlama model and syllabus-fitted TF-IDF, otherwise TF-IDF alone. WordLlama (256-dimensional static embeddings, MIT licence) ships inside the `wordllama` pip package, so it needs no download and runs at every course size. The hybrid cosine is 0.3 × pretrained + 0.7 × TF-IDF (`embeddings.hybrid_pretrained_weight`). On the demo course the hybrid, with the causal feedback pass described in section 9, puts 131 of 140 in-syllabus questions on the right topic and keeps all 4 old-syllabus questions outside. Repeat detection still uses character n-grams unless a sentence-transformer is installed, because character n-grams found the right topic for more reworded questions (14 of 26, against 11 for WordLlama). The app still downloads nothing on its own. |
+| D2 | "Use Markov, HMM, survival, gradient boosting, calibration" vs "you will often have 5 to 15 exams". A single topic with 10 exams has 10 binary observations. No per-topic model can be fitted on that. | Every learned model is **pooled across topics**: one row per (exam, topic). Ten exams and 40 topics give about 280 training rows after warm-up. Per-topic parameters use empirical-Bayes shrinkage toward the pooled estimate. Complex models are gated by data-sufficiency rules and must also win the backtest.<br><br>**Revised in the low-data upgrade:** the data-sufficiency gates (`models.sufficiency`) were removed and no other threshold replaced them. Every component runs on every backtest fold at every course size. Instead of a gate, each component gets a reliability prior that grows with the number of papers and shrinks with the number of parameters it estimates from this course (section 3). That prior is multiplied by the quality of the component's inputs (mapping confidence, parse confidence, share of marks known, missing calendar years, formats seen, syllabus weight source), and the ensemble weight also depends on how well the component ranked earlier papers. A component reports "unavailable" only when an input it needs does not exist. Pooling stays: the hierarchical Bayesian recurrence pools at course, unit and topic level, and the course logistic model is pulled toward a general ranking model trained on simulated courses and other real courses in your library. Set `models.use_simulated_prior = false` and the simulated part is dropped. A component no longer has to win the backtest to contribute. Old settings files that still contain `models.sufficiency` load normally and the key is ignored. See section 3 and [Low-data inference](LOW_DATA_INFERENCE.md#2-what-replaced-the-cutoff). |
+| D3 | "Calibrated probabilities" vs tiny validation sets. Isotonic regression on 200 points overfits. | Platt scaling (two parameters) on the percentile rank of each topic, fitted only on out-of-sample backtest predictions. Probabilities are shown only when nested calibration beats the base-rate Brier score. Otherwise the UI shows "relative score" and says why.<br><br>**Revised in the low-data upgrade:** Platt scaling and isotonic regression now compete. For each held-out paper, each calibrator is fitted on earlier held-out papers only, and the one with the lower nested log loss is used. The fixed row and positive-count minimums (`calibration.min_rows`, `calibration.min_positives`) were removed. Probabilities are shown only when the nested Brier gain over the base rate clears a one-sided 95% t-bound: the gain must exceed the t quantile for the number of papers times the standard error of the per-paper gain. With few papers both the quantile and the standard error are large, so you see relative scores with a rank interval and an evidence strength instead. |
+| D4 | Backtests on very few exams. With 5 exams and 3 warm-up exams you get 2 folds; a metric averaged over 2 folds is close to noise. | The backtest reports the standard error for every metric and the number of folds. Model selection uses the one-standard-error rule, which prefers the simpler model when the gap is inside the noise. Below 4 exams, no backtest runs and the app uses transparent statistics only.<br><br>**Revised in the low-data upgrade:** there is no minimum number of exams for backtesting. The backtest is rolling-origin over every fold: with T papers, papers 2 to T are each predicted from the papers before them, which gives T − 1 folds (`models.min_train_exams` defaults to 1). One paper gives no fold, and the app says accuracy cannot be measured yet. Each report gives the number of folds, the fold-to-fold standard deviation, a 95% t-interval for the mean metric, and paired comparisons with random, frequency, recency-frequency and Bayesian recurrence. The one-standard-error rule no longer chooses the final ranking; it survives only in the question-type forecast (layer 2) and in `select_model`, a compatibility function the analysis no longer calls. The evidence-aware ensemble is the final ranking unless `best_single` beat it on the same held-out papers beyond a one-sided 95% t-bound of the paired differences (`ensemble.replace_confidence`, default 0.95). `best_single` is an out-of-sample selector: for each held-out paper it uses the method that did best on the papers before it, so its score is not inflated by picking the winner after seeing every fold. Tuned variants (decay, window, half-life, Bayesian recency discount) keep their default unless another variant is ahead on earlier folds beyond a one-sided 95% t-bound. |
 | D5 | Using the **current** syllabus to backtest **old** exams leaks a small amount of future knowledge (the candidate set is defined with today's syllabus). | Unavoidable unless historical syllabi are supplied. The data model supports syllabus versions; when a historical version exists it is used for that period. The backtest report states which syllabus each fold used. |
 | D6 | "Detect rotation cycles" and "examiner tendencies". Ten observations rarely support a periodicity claim, and examiner identity is almost never printed. | Rotation is tested against a permutation null (shuffle the appearance positions, compare gap regularity). The app reports a rotation only if `p < 0.10` with at least three gaps. Examiner is an optional metadata field used for descriptive tables only, never as a predictive feature. |
 | D7 | "Generate plausible question formulations" vs "never introduce unsupported material". Free-form text generation cannot guarantee grounding. | Generation is template plus retrieval: templates come from the course's own historical question openers, slots are filled only with syllabus phrases, and a grounding checker rejects any output that contains a content word absent from the syllabus and the topic's historical questions. |
@@ -61,8 +61,8 @@ The specification is long, but most of it reduces to five engineering problems:
 
 *Revised in the low-data upgrade.* The original table listed, for each component, the
 course size below which it was switched off. That cutoff no longer exists. Every component
-runs at every course size, and what changes with data is how reliable it is and how much
-weight it gets in the final ranking.
+runs at every course size unless an input it needs does not exist, and what changes with data
+is how reliable it is and how much weight it gets in the final ranking.
 
 Each ensemble component has a reliability prior:
 
@@ -72,13 +72,15 @@ reliability = (papers + pk) / (papers + pk + df)
 
 `df` is the number of parameters the component estimates from this course, and `pk` is 1 for
 components that bring outside knowledge (pretrained semantics, syllabus structure, the
-cross-course model), otherwise 0. A paper without a year counts as half a paper. Questions
-never count: a paper with forty questions is one paper. The table gives the reliability prior
-for courses where every paper has a year.
+cross-course model), otherwise 0. Semantic evidence gets it only when the pretrained model is
+present. A paper without a year is excluded at ingestion; if you
+include it anyway in Review, it counts as half a paper. Questions never count: a paper with
+forty questions is one paper. The table gives the reliability prior for courses where every
+paper has a year, before the input-quality factor described below.
 
 | Component | Knowledge comes from | df | Reliability prior at 2 / 5 / 15 papers | Behaviour with few papers |
 |---|---|---:|---|---|
-| General ranking model | simulated courses, plus other real courses in your library | 0 | 1.00 / 1.00 / 1.00 | needs no course data; carries much of the weight before any fold exists |
+| General ranking model | simulated courses (unless `models.use_simulated_prior` is false), plus other real courses in your library; UNAVAILABLE when neither exists | 0 | 1.00 / 1.00 / 1.00 | needs no course data; carries much of the weight before any fold exists |
 | Semantic evidence (pretrained) | bundled WordLlama model + syllabus TF-IDF | 0.5 | 0.86 / 0.92 / 0.97 | runs from the first paper; topics with little history of their own lean on it more |
 | Syllabus coverage | syllabus units, hours, marks or breadth | 0.5 | 0.86 / 0.92 / 0.97 | works with zero papers; unavailable only when the syllabus has a single unit and no hours, marks or sub-topics |
 | Recency-frequency | this course | 1 | 0.67 / 0.83 / 0.94 | keeps its default decay until another is reliably better on earlier papers |
@@ -88,18 +90,22 @@ for courses where every paper has a year.
 | Temporal recurrence | this course | 3 | 0.40 / 0.63 / 0.83 | uses the gap hazard only when its prequential log score beats the simple Bayesian rate; otherwise the simple rate |
 | Co-occurrence | this course | 3 | 0.40 / 0.63 / 0.83 | unavailable until two consecutive earlier papers exist |
 | Pooled hot/cold HMM | this course | 5 | 0.29 / 0.50 / 0.75 | smoothed EM, runs on short histories |
-| Course-specific logistic | this course, pulled toward the general model | 21 | 0.09 / 0.19 / 0.42 | with zero training rows it equals the general model |
+| Course-specific logistic | this course, pulled toward the general model | 22.5 | 0.08 / 0.18 / 0.40 | with zero training rows it equals the general model; with no general model its prior is centred on zero |
 | Random forest, gradient boosting | this course | 40 | 0.05 / 0.11 / 0.27 | on a fold where every training label is the same, the general model's score is used and the fold is reported |
 
-The weight of component m is `reliability × exp(2 × skill) × g(x)`, normalised over the
-components. Skill is how much better than the average component it ranked earlier papers,
-shrunk toward zero by folds / (folds + 3). The per-topic factor g(x) gives outside-knowledge
-components more weight on topics whose own history says little. A component is shown as
+The weight of component m is `quality × reliability × exp(2 × skill) × g(x)`, normalised over
+the components. Quality (0 to 1) is computed from papers before the cutoff: mapping confidence
+for semantic evidence, formats seen for question-type fit, the syllabus weight source for
+coverage, missing calendar years for the temporal components, and parse confidence and the
+share of marks known for the course-learned models. Skill is how much better than the
+average component it ranked earlier papers, in units of the fold spread, shrunk toward zero
+by folds / (folds + 3). The per-topic factor g(x) gives outside-knowledge components more
+weight on topics whose own history says little. A component is shown as
 LIMITED while its reliability is below 0.5, DOWNWEIGHTED when it ranked earlier papers
 clearly worse than the average component (skill below −0.25 and weight below half an equal
 share), and UNAVAILABLE only when an input it needs does not exist.
-On simulated courses the course logistic model gets 2% of the ensemble weight at 2 to 3 papers
-and 11% at 20.
+On simulated courses the course logistic model gets 2 to 3% of the ensemble weight at 2 to 3
+papers and 11% at 20.
 
 Parts that are not ensemble components:
 
@@ -107,15 +113,21 @@ Parts that are not ensemble components:
 |---|---|---|
 | Ingestion, OCR, segmentation, syllabus parsing, alignment | work from the first file | unchanged |
 | Time-aware backtest | T − 1 folds; with one fold accuracy cannot be measured, and with fewer than about five the confidence interval is wider than most differences between methods | more folds give a narrower interval, and skill on earlier papers starts to separate the components |
-| Probability calibration | relative scores, rank intervals and evidence strength, because the standard error of the Brier gain is large | probabilities once the nested Brier score beats the base rate by more than one standard error |
+| Probability calibration | relative scores, rank intervals and evidence strength, because the standard error of the Brier gain is large | probabilities once the nested Brier gain over the base rate clears a one-sided 95% t-bound |
 | Question-type forecast (layer 2) | all three forecast methods compete on every fold; the simplest within one standard error of the best is used | same rule, with more folds behind it |
 | Rotation detection (descriptive) | a topic is tested only after four appearances (three gaps) | reported only when a permutation test gives p < 0.10 (D6) |
 
+With a syllabus and no papers the analysis still runs. The ranking then comes from the
+general model and the syllabus structure, every topic gets the rank range 1 to K with High
+uncertainty, and no probability is shown.
+
 There are no size thresholds to configure. The run-level label reads "Low-data advanced
-inference" while the course-learned ranking models have reliability below 0.5, which holds
-below about 20 papers, and "Advanced inference" after that. It never says that inference is
-disabled. The status of every component and the reason for it are written into the analysis
-report. Details: [Low-data inference](LOW_DATA_INFERENCE.md), sections 3, 5 and 10.
+inference" while the most reliable course-learned model (logistic, gradient boosting or
+random forest) has reliability below 0.5, and "Advanced inference" after that. On a course
+like the demo the logistic model estimates about 22.5 parameters, so the label changes at
+about 25 papers. The label is wording only: it switches nothing on or off, and it never says
+that inference is disabled. The status of every component and the reason for it are
+written into the analysis report. Details: [Low-data inference](LOW_DATA_INFERENCE.md), sections 3, 5 and 10.
 
 ---
 
@@ -161,7 +173,9 @@ Design rules:
   model), the question-type taxonomy and the parsers are generic and shared. The general
   ranking model is generic too: it is trained on simulated courses and updated with the
   scale-free feature rows of other real courses in your library, never with the course
-  being predicted and never with synthetic courses such as the demo. Everything else learned
+  being predicted and never with synthetic courses such as the demo. With
+  `models.use_simulated_prior = false` (a checkbox on the Settings page) it learns from other
+  real courses alone, and with none in the library it is UNAVAILABLE. Everything else learned
   from history (Bayesian rates, hazards, course logistic weights, calibration) is fitted per
   course, per analysis run, and stored with that run. *Revised in the low-data upgrade:* the
   original rule said one course's history never enters another course's model. Now course A
@@ -191,7 +205,8 @@ files ──► page text (native or OCR, with confidence)
 syllabus files ──► topic tree per document ──► merged canonical tree (with source refs)
 
 questions × topics ──► alignment scores (semantic similarity, by default the pretrained + TF-IDF
-                       hybrid, plus IDF keyword coverage)
+                       hybrid, plus IDF keyword coverage; the feedback pass for a paper uses
+                       only questions from earlier papers)
                    ──► status A clearly in / B probably in / C uncertain / D outside
                    ──► (A and validated B only) incidence panel Y[t, k] with one row per exam,
                        marks, types, semantic soft evidence (question level)
@@ -202,7 +217,8 @@ panel ──► features at each cutoff t (frequency, recency, gaps, hazard, Bay
       ──► rolling-origin backtest: predictions for every target t from the second paper on,
           using exams < t only
       ──► nested tuning, evidence-aware ensemble weights and calibration (only earlier targets)
-      ──► final choice: the ensemble, unless a single method beat it by more than one standard error
+      ──► final choice: the ensemble, unless best_single (the method that did best on earlier
+          papers, chosen afresh for each paper) beat it beyond a one-sided 95% t-bound
       ──► final ranking for exam T+1 with rank intervals, evidence strength and, where
           validated, calibrated probability bands
       ──► explanations (component contributions, Bayesian posterior, semantic evidence, why-not)
@@ -236,20 +252,21 @@ component estimates from this course; it sets the reliability prior in section 3
 | Recency-weighted (EWMA) | baseline | baseline | half-life tuned on earlier folds | | 2 |
 | Linear decay | baseline | baseline | none | | 2 |
 | Frequency + recency | baseline | baseline | rank average | | 2 |
+| Best single method (`best_single`) | baseline, rival to the ensemble | selection | for each held-out paper, the method with the best mean score on the papers before it | | 4 |
 | Recency-frequency | component | recency | decay strategy (none, linear, last-N window or half-life) chosen on earlier folds | 1 | 2 |
 | Hierarchical Bayesian recurrence | component | Bayesian | beta-binomial pooled at course, unit and topic level; prior strength by empirical Bayes; recency discount chosen on earlier folds | 1 | 3 |
 | Semantic evidence (pretrained) | component | semantic | similarity-weighted soft counts from past in-syllabus questions | 0.5 | 3 |
-| Syllabus coverage | component | structure | unit-level Bayesian rate × topic share from syllabus hours, marks or breadth | 0.5 | 2 |
+| Syllabus coverage | component | structure | unit-level Bayesian rate × square root of the topic's relative share of its unit (syllabus hours, marks or breadth) | 0.5 | 2 |
 | Question-type fit | component | structure | topic's usual formats against the recent paper mix | 1 | 2 |
 | Topic co-occurrence | component | structure | smoothed lift of topics following the previous paper's topics | 3 | 3 |
 | Two-state Markov (empirical Bayes) | component | temporal | transition rates shrunk to pooled | 2 | 3 |
 | Temporal recurrence | component | survival | pooled gap hazard, used only when its prequential log score beats the simple Bayesian rate | 3 | 3 |
 | Pooled hot/cold HMM | component | temporal | two shared hidden states, smoothed EM | 5 | 6 |
-| General ranking model | component | transfer | logistic on 22 scale-free features, trained on 400 simulated courses and updated with other real courses | 0 | 2 |
-| Course-specific logistic | component | ML | 22 scale-free and 20 course-only features; Gaussian prior centred on the general model | 21 | 4 |
+| General ranking model | component | transfer | logistic on 22 scale-free features, trained on 400 simulated courses (optional, `models.use_simulated_prior`) and updated with other real courses | 0 | 2 |
+| Course-specific logistic | component | ML | 22 scale-free and 23 course-only features (including optional rate, semantic density, syllabus centrality, mapping and parse confidence, marks known); Gaussian prior centred on the general model | 22.5 | 4 |
 | Random forest | component | ML | bagged trees on all features | 40 | 6 |
 | Gradient boosting | component | ML | histogram gradient boosting on all features | 40 | 6 |
-| Evidence-aware ensemble | final ranking | ensemble | weights from reliability × exp(2 × skill on earlier folds) × per-topic gate | 0 | 5 |
+| Evidence-aware ensemble | final ranking | ensemble | weights from input quality × reliability × exp(2 × skill on earlier folds) × per-topic gate | 0 | 5 |
 
 The original list had a "Semantic soft recurrence" model, a plain "Pooled hazard", an L2
 logistic regression fitted on the course's rows alone, data-size gates on the hazard, the
@@ -284,7 +301,7 @@ version 2.
 | `backtest_fold` | id, run_id, layer, model_name, target_exam_id, target_index, target_label, n_train_exams, metrics |
 | `prediction` | id, run_id, layer, topic_id, item_key, label, rank, score, probability, prob_low, prob_high, calibrated, category, confidence, features, contributions, evidence, why_not, **evidence_strength** (Strong / Moderate / Limited / Minimal), **uncertainty** (rank interval and level) |
 | `predicted_question` | id, run_id, topic_id, text, question_type, marks_low, marks_high, basis, rank, evidence_question_ids, grounding |
-| **`model_registry`** | id, scope (`global` / `course`), course_id, run_id, name, version, source (`simulation` / `simulation+repository` / `course`), fingerprint, params, training, created_at |
+| **`model_registry`** | id, scope (`global` / `course`), course_id, run_id, name, version, source (`simulation` / `simulation+repository` / `repository` / `none` for scope `global`, `course` for scope `course`), fingerprint, params, training, created_at |
 | **`course_feature_set`** | id, course_id, run_id, layer, is_synthetic, feature_names, n_rows, n_exams, X, y, created_at; one row per course and layer, replaced on each analysis; scale-free features only, no topic names or raw counts |
 | **`schema_version`** | id, version, applied_at, note |
 | `search_index` (FTS5) | kind, ref_id, course_id, text |
@@ -293,9 +310,11 @@ version 2.
 migrations never drop columns. No model is gated any more, so new runs store
 `enabled = true` and an empty reason; the component status and its reason take their place.
 
-`model_registry` separates the two kinds of learned knowledge. Scope `global` records each
-general ranking model actually used, with the courses it learned from; scope `course` holds
-the course-specific logistic model's coefficients for a run. `course_feature_set` is the
+`model_registry` separates the two kinds of learned knowledge. Scope `global` holds one row
+per distinct general ranking model ever used, keyed by a fingerprint of the prior source and
+the other courses' feature sets it learned from; each analysis run records that fingerprint
+in its `config`, so you can tell which general model a run used. Scope `course` holds the
+course-specific logistic model's coefficients for a run. `course_feature_set` is the
 only thing other courses learn from. Rows of synthetic courses are stored flagged and never
 used for cross-course training.
 
@@ -341,7 +360,8 @@ package. Hash routes:
   with baselines) and the ensemble components with their reliability.
 * `#/course/:id/paper` predicted paper simulation.
 * `#/course/:id/search` keyword and semantic search.
-* `#/settings` thresholds, decay, strictness, OCR, embedding backend.
+* `#/settings` thresholds, decay, strictness, OCR, embedding backend, and the checkbox "Use
+  the simulated cross-course prior" (`models.use_simulated_prior`).
 
 ---
 
@@ -390,17 +410,20 @@ screen let you compare both on your own course.
 *Revised in the low-data upgrade:* TF-IDF stays inside the default, because the bundled
 pretrained model does not beat it for alignment. On the demo course WordLlama alone put 118
 of 140 questions on the right topic and marked only 1 of 4 old-syllabus questions as
-outside. The hybrid keeps TF-IDF's separation (127 of 140, all 4 old-syllabus questions
-outside) and adds general language knowledge for semantic evidence, similarity between
-topics, and checks on generated questions. See
-[Low-data inference](LOW_DATA_INFERENCE.md#alignment-backends).
+outside (measured before the feedback pass became causal). The hybrid keeps TF-IDF's
+separation (131 of 140 with causal feedback, all 4 old-syllabus questions outside) and adds
+general language knowledge for semantic evidence, similarity between topics, and checks on
+generated questions. See [Low-data inference](LOW_DATA_INFERENCE.md#alignment-backends).
 
 Fitting the alignment TF-IDF on the **syllabus only** keeps exam text out of the
 representation, which removes a subtle leakage path (document frequencies computed from
-future exams). The pretrained model fits nothing on exam text either. One path remains:
-the alignment feedback pass moves topic vectors toward questions mapped to them from all
-papers, so the mapping of an older paper can be influenced by wording in later papers
-(listed under limitations in [Low-data inference](LOW_DATA_INFERENCE.md#11-limitations)).
+future exams). The pretrained model fits nothing on exam text either. The alignment
+feedback pass, which moves topic vectors toward confidently mapped questions, is causal:
+when it aligns a paper it uses only questions from earlier papers (by exam order), so a
+later paper's wording cannot change how an earlier paper is mapped. Before this fix the
+held-out paper's own wording fed its alignment, and the demo's backtest scores against
+mapped labels were optimistic by about 0.035 (each fell by 0.02 to 0.05 once feedback became
+causal; status counts moved from A 109 / B 27 / C 4 / D 4 to A 104 / B 30 / C 6 / D 4).
 
 ---
 
@@ -413,14 +436,14 @@ papers, so the mapping of an older paper can be influenced by wording in later p
 | Question segmentation, marks, OR groups, metadata | deterministic rules + confidence + manual correction | no labelled data; rules are inspectable and fixable |
 | Question type | rule taxonomy (JSON, extensible) | no labelled data; user corrections stored for a future learned classifier |
 | Syllabus parsing and merge | deterministic + fuzzy matching | inspectable |
-| Alignment | hybrid of the bundled pretrained model and TF-IDF (or a downloaded sentence-transformer) + IDF keyword coverage + thresholds | similarity is learned elsewhere; thresholds are explicit |
+| Alignment | hybrid of the bundled pretrained model and TF-IDF (or a downloaded sentence-transformer) + IDF keyword coverage + thresholds; feedback from earlier papers only | similarity is learned elsewhere; thresholds are explicit |
 | Families (exact / paraphrase) | similarity + string ratio thresholds | explicit and testable |
 | Frequency, recency, gaps, co-occurrence, structure | statistics | small data |
 | Bayesian recurrence, Markov, hazard | hierarchical beta-binomial and survival statistics with shrinkage; the gap hazard is used only when its prequential log score beats the simple rate | small data, pooled |
-| General ranking model | logistic regression trained on simulated courses, updated with other real courses | needs no data from the course being predicted |
+| General ranking model | logistic regression trained on simulated courses, updated with other real courses (other real courses alone when `models.use_simulated_prior` is false) | needs no data from the course being predicted |
 | Course logistic, RF, GBM, HMM | learned on every fold; weight = reliability prior × measured skill on earlier papers (revised in the low-data upgrade; originally gated and required to win the backtest) | present at every size, influence grows with evidence |
-| Calibration | Platt scaling or isotonic regression on out-of-sample predictions, chosen by nested log loss | probabilities shown only when they beat the base rate by more than one standard error |
-| Ensemble weights | reliability × exp(2 × skill on earlier folds) × per-topic gate (revised; originally a rank average of members chosen on earlier folds) | no weights fitted by optimisation; skill is shrunk toward zero when there are few folds |
+| Calibration | Platt scaling or isotonic regression on out-of-sample predictions, chosen by nested log loss | probabilities shown only when the Brier gain over the base rate clears a one-sided 95% t-bound |
+| Ensemble weights | input quality × reliability × exp(2 × skill on earlier folds) × per-topic gate (revised; originally a rank average of members chosen on earlier folds) | no weights fitted by optimisation; skill is shrunk toward zero when there are few folds |
 | Question formulations | templates + retrieval + grounding check, then topic, semantic and question-type verification | guarantees no unsupported content |
 
 ---
@@ -436,7 +459,8 @@ main rule (see D4).
 
 1. **Targets.** For every `t` from `min_train_exams` (default 1) to `T-1`, every model sees
    exams `e_0..e_{t-1}` and predicts the topic set of `e_t`. With T papers that is T − 1
-   folds; one paper gives none. The final prediction uses the same code with `t = T`.
+   folds; one paper gives none, and with no paper the analysis still runs on prior
+   knowledge (section 3). The final prediction uses the same code with `t = T`.
 2. **Feature cutoff.** Features for target `t` are computed from `panel.until(t)`, which
    physically removes rows `t` and later.
 3. **Training rows for learned models.** For target `t`, training rows are
@@ -446,15 +470,21 @@ main rule (see D4).
 4. **Nested tuning.** Hyperparameters (decay strategy, window length, half-life, Bayesian
    recency discount), ensemble weights and calibration for target `t` are chosen using only
    the backtest results of targets `s < t`. A tuned model keeps its default unless another
-   variant is ahead by more than one standard error of the paired difference. Because each
+   variant is ahead beyond a one-sided 95% t-bound of the paired differences. Meta models
+   (tuned variants, ensemble skill, `best_single`) score earlier folds with the K known at
+   that time (the median topics per paper over that fold's paper and the papers before it,
+   all before the cutoff), so later papers cannot shift K
+   for earlier folds (`test_later_papers_never_change_earlier_predictions`). Because each
    stored prediction at `s` was itself computed from exams before `s`, reusing it is safe.
 5. **Metrics per fold**, then mean, standard error, fold-to-fold standard deviation and a
    95% t-interval across folds.
-6. **Final choice.** The evidence-aware ensemble is the final ranking unless a single
-   method beat it over the held-out papers by more than one standard error of the paired
-   difference (`ensemble.replace_if_worse_by_se`). Only then does the one-standard-error
-   rule apply: the simplest method within one standard error of the best is used, and the
-   report says so. With no fold, the ensemble runs on its reliability priors alone.
+6. **Final choice.** The evidence-aware ensemble is the final ranking unless `best_single`
+   beat it on the same held-out papers beyond a one-sided 95% t-bound of the paired
+   differences (`ensemble.replace_confidence`, default 0.95). `best_single` uses, for each
+   held-out paper, the method that did best on the papers before it, so its scores are out of
+   sample; picking the winner after seeing every fold would favour whichever method got lucky.
+   If it does replace the ensemble, the report says so. With no fold, the ensemble runs on its
+   reliability priors alone.
 7. **Reported baselines.** Random (exact expectation), most frequent, most recent,
    recency-weighted, and the final choice, always side by side. The validation summary adds
    paired differences against random, frequency, recency-frequency and Bayesian recurrence,
@@ -465,8 +495,11 @@ main rule (see D4).
    set for every fold (D5).
 9. **Ablation.** On the same folds, staged ablation (frequency, + recency, + Bayesian
    smoothing, + semantic, + topic structure, + temporal dynamics, full ensemble) and
-   leave-one-component-out. Each change carries its paired standard error and is labelled
-   "not reliable" when it is within one standard error.
+   leave-one-component-out. Each stage is the evidence-aware ensemble restricted to the
+   listed components plus the earlier stages' members; baselines such as frequency stay in.
+   Each change carries its paired standard error and is called reliable only when it falls
+   outside a two-sided 95% t-interval of the paired per-paper differences. The note lists
+   reliable gains and reliable losses separately.
 
 Primary metric: NDCG@K, where K is configurable and defaults to the median number of
 distinct topics per past exam (bounded to 3..15). Also reported: Precision@K, Recall@K,
@@ -482,8 +515,8 @@ Brier score and expected calibration error.
 | Segmentation on digital PDFs and DOCX in the test fixtures | 95% of question boundaries and marks correct |
 | Year detection on fixtures | 95% correct, and the rest flagged for review |
 | Syllabus alignment on labelled fixtures | 85% top-1 topic accuracy; out-of-syllabus questions never mapped to status A |
-| Prediction | the selected model's NDCG@K is at least the best simple baseline's; if no learned model beats the baselines by more than one standard error, a baseline is selected and the report says so. *Revised in the low-data upgrade:* the final ranking is reported next to random, frequency, recency-frequency and Bayesian recurrence on the same folds, with paired differences, standard errors and a 95% interval; no gain inside one standard error is claimed, and a single method replaces the ensemble only if it beat the ensemble by more than one standard error |
-| Calibration | probabilities shown only when nested Brier score beats the base-rate Brier (revised: by more than one standard error of the per-paper difference) |
+| Prediction | the selected model's NDCG@K is at least the best simple baseline's; if no learned model beats the baselines by more than one standard error, a baseline is selected and the report says so. *Revised in the low-data upgrade:* the final ranking is reported next to random, frequency, recency-frequency and Bayesian recurrence on the same folds, with paired differences, standard errors and a 95% interval; no gain inside that interval is claimed, and `best_single` replaces the ensemble only if it beat the ensemble beyond a one-sided 95% t-bound of the paired differences |
+| Calibration | probabilities shown only when nested Brier score beats the base-rate Brier (revised: the per-paper Brier gain must clear a one-sided 95% t-bound) |
 | Leakage | the perturbation test passes for every model |
 | Syllabus boundary | zero predicted topics or formulations outside the current syllabus |
 | Performance | a 15-paper course analyses in under 60 s on a 4-core laptop with the default backend; unchanged documents are never reprocessed |
@@ -534,10 +567,14 @@ The low-data upgrade added `tests/unit/test_low_data.py`. It runs courses of 0 t
 papers and checks that every component runs at every size, that semantic and
 Bayesian components are active with 2 to 5 papers, that course-learned models are
 downweighted when uncertain and gain weight with data, that questions do not inflate
-temporal evidence, that no model (including meta models) leaks future papers, that the
-message never says inference is disabled, and that results are reproducible.
-`tests/unit/test_repository_and_migrations.py` checks the schema migration and that other
-courses never change a course's own history.
+temporal evidence, that no model (including meta models) leaks future papers, that later
+papers never change earlier predictions, that zero papers still give a ranking, that the
+general model is reported unavailable without the simulated prior, that the message never
+says inference is disabled, and that results are reproducible.
+`tests/unit/test_repository_and_migrations.py` checks the schema migration, that the
+simulated prior can be turned off, and that other courses never change a course's own
+history. `tests/integration/test_end_to_end.py` runs a course with a syllabus and no papers
+end to end.
 
 ---
 
@@ -580,23 +617,27 @@ courses never change a course's own history.
 ### Measured against the success metrics (synthetic demo, 12 papers)
 
 *Revised in the low-data upgrade.* These numbers come from the upgraded engine with default
-settings (hybrid alignment, evidence-aware ensemble). The full results, including simulated
-courses with known true topics, the staged ablation and the alignment backends, are in
+settings (hybrid alignment with causal feedback, evidence-aware ensemble). The full results,
+including simulated courses with known true topics, the staged ablation and the alignment
+backends, are in
 [Low-data inference, section 8](LOW_DATA_INFERENCE.md#8-results).
 
 | Target (section 12) | Result |
 |---|---|
 | Segmentation on digital PDFs and DOCX | 144 of 144 demo questions found with correct marks across PDF, DOCX and text papers; fixture tests cover TU, KU and generic formats |
 | Year detection | 12 of 12 demo papers; fixture tests cover AD, BS and file-name years |
-| Alignment top-1 accuracy at least 85%, out-of-syllabus never A | 90.7% (127 of 140) with the default hybrid backend; TF-IDF alone 91.4% (128 of 140); 4 of 4 old-syllabus questions marked D; 0 in-syllabus questions marked D |
-| Final ranking compared with the simple baselines | against the app's own mapped labels on 11 held-out papers: evidence-aware ensemble NDCG@11 0.754 ± 0.033, recent-window frequency 0.720, most frequent topics 0.709, random 0.460; ensemble minus frequency +0.046 ± 0.021, better on 9 of 11 papers. Against the generator's planted true topics, which a real course cannot measure, the ensemble does **not** beat plain frequency: 0.732 against 0.745, within one standard error |
-| Probabilities shown only when they beat the base rate | Platt chosen over isotonic by nested log loss; nested Brier 0.182 vs 0.249 base rate on 10 later papers (gain 0.067 ± 0.006), so probabilities are shown |
-| Leakage audit passes | passes for 33 models, including tuned variants and the ensemble |
-| No prediction or formulation outside the syllabus | asserted in `tests/integration/test_end_to_end.py`; 56 generated formulations checked, 4 rejected by verification |
+| Alignment top-1 accuracy at least 85%, out-of-syllabus never A | 93.6% (131 of 140) with the default hybrid backend and causal feedback; all 9 misses have status B; 4 of 4 old-syllabus questions marked D; 0 in-syllabus questions marked D; status counts A 104 / B 30 / C 6 / D 4 |
+| Final ranking compared with the simple baselines | against the app's own mapped labels on 11 held-out papers: evidence-aware ensemble NDCG@11 0.717 ± 0.027, recent-window frequency 0.687, most frequent topics 0.678, random 0.456; ensemble minus frequency +0.039 ± 0.019, better on 9 of 11 papers, which is inside a two-sided 95% t-interval (±0.042), so it is not a reliable gain. The ensemble was kept: `best_single` scored 0.707 (difference +0.010 ± 0.018). Against the generator's planted true topics, which a real course cannot measure, the ensemble does **not** beat plain frequency: 0.738 against 0.734, difference +0.004 ± 0.017 |
+| Probabilities shown only when they beat the base rate | isotonic chosen over Platt by nested log loss; nested Brier 0.191 vs 0.248 base rate on 10 later papers (gain 0.057 ± 0.005, skill 23%), beyond the one-sided 95% bound, so probabilities are shown; expected calibration error 0.042 |
+| Leakage audit passes | passes for 34 models, including tuned variants and the ensemble |
+| No prediction or formulation outside the syllabus | asserted in `tests/integration/test_end_to_end.py`; 53 generated formulations checked, 2 rejected by verification (both reused past numericals filed under the wrong topic) |
 | A 15-paper course in under 60 s | 12 papers analysed in about 9 s on 4 cores (about 7 s before the upgrade), mostly tree models refitted on every fold; ingestion under 1 s for digital files |
 
 Part of the gain against mapped labels comes from the semantic component, which uses the
-same alignment scores that produce the labels. Gains over frequency are shown on simulated
-courses: with planted patterns, the ensemble beat frequency by 0.05 to 0.08 NDCG at every
-size from 3 papers, and the general model alone was as good as or slightly better than the
-ensemble on those generators. Simulated courses are only as realistic as their generators.
+same alignment scores that produce the labels. Gains over frequency are shown mainly on
+simulated courses in in-sample rolling-origin backtests: with planted patterns, the ensemble
+beat frequency by 0.03 to 0.08 NDCG (2 to 20 papers, 8 courses per size), and the general
+model alone was as good as or slightly better than the ensemble on those generators. On the
+next paper only (fit on T papers, score paper T + 1, 40 courses per size) the gain is small:
+between -0.008 ± 0.012 and +0.032 ± 0.012, and clearly positive only at T = 5. Simulated courses
+are only as realistic as their generators.
