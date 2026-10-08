@@ -170,12 +170,17 @@ def prequential_log_scores(Y: np.ndarray, predict: Callable[[np.ndarray], np.nda
     return out
 
 
-def evidence_label(prior_contribution: float) -> str:
-    """Descriptive label for how much of a topic's estimate comes from its own history."""
-    if prior_contribution < 0.3:
+def evidence_label(variance_ratio: float) -> str:
+    """How much a topic's own history has narrowed its estimate.
+
+    ``variance_ratio`` is posterior variance / prior variance for that topic: 1 means the papers
+    taught nothing about it, values near 0 mean its rate is well measured (that includes a topic
+    absent from many papers, which is strong evidence that it is rarely tested).
+    """
+    if variance_ratio < 0.3:
         return "Strong"
-    if prior_contribution < 0.5:
+    if variance_ratio < 0.5:
         return "Moderate"
-    if prior_contribution < 0.75:
+    if variance_ratio < 0.75:
         return "Limited"
     return "Minimal"

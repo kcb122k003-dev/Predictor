@@ -135,7 +135,7 @@ def build_topic_predictions(panel: Panel, report: BacktestReport, fm: FeatureMat
             facts["temporal_log_bayes_factor"] = temporal.info.get("log_bayes_factor")
         if semantic_evidence and panel.item_ids[i] in semantic_evidence:
             facts["semantic_evidence"] = semantic_evidence[panel.item_ids[i]]
-        strength = evidence_label(float(post.prior_contribution[i])) if post is not None else "Minimal"
+        strength = evidence_label(float(post.variance_ratio[i])) if post is not None else "Minimal"
         facts["evidence_summary"] = _evidence_summary(facts, strength)
         conf = _confidence(facts, p, lo, hi, probs is not None, unc)
         evidence = _evidence_lines(panel, facts, syllabus_location.get(panel.item_ids[i]) if syllabus_location else None)
@@ -273,7 +273,11 @@ def _evidence_summary(facts: dict[str, Any], strength: str) -> str:
     3 questions) + strong syllabus match'."""
     T, a, nq = facts.get("exams", 0), facts.get("appearances", 0), facts.get("questions_total", 0)
     hist = {"Strong": "Strong", "Moderate": "Moderate", "Limited": "Sparse", "Minimal": "Very sparse"}.get(strength, strength)
-    text = f"{hist} historical evidence ({a} of {T} paper{'s' if T != 1 else ''}, {nq} question{'s' if nq != 1 else ''})"
+    papers = f"{a} of {T} paper{'s' if T != 1 else ''}, {nq} question{'s' if nq != 1 else ''}"
+    if a == 0 and strength in ("Strong", "Moderate"):
+        text = f"{hist} historical evidence that it is rarely tested ({papers})"
+    else:
+        text = f"{hist} historical evidence ({papers})"
     mc = facts.get("mapping_confidence")
     if mc is not None:
         text += " + " + ("strong" if mc >= 0.75 else "moderate" if mc >= 0.55 else "weak") + " syllabus match"
@@ -294,7 +298,8 @@ def _model_lines(facts: dict[str, Any], unc: dict[str, Any], contrib: dict[str, 
         lines.append(f"Bayesian recurrence: {_fmt_pct(b['posterior_mean'])} chance of appearing (80% credible interval "
                      f"{_fmt_pct(lo)}-{_fmt_pct(hi)}), from {obs['appearances']} appearance(s) in {obs['exams']} paper(s); "
                      f"{_fmt_pct(b['prior_contribution'])} of the estimate comes from the unit and course prior. "
-                     f"Evidence strength: {strength}.")
+                     f"Evidence strength: {strength} (its posterior variance is {_fmt_pct(b['variance_ratio'])} of the "
+                     f"prior's).")
     mode = facts.get("temporal_mode")
     if mode:
         bf = facts.get("temporal_log_bayes_factor")

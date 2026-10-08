@@ -218,7 +218,8 @@ class AnalysisService:
         # 2. Alignment ----------------------------------------------------------
         self._progress(run_id, 0.1, "Mapping questions to the syllabus")
         aligner = SyllabusAligner(settings, tree, backend)
-        results = aligner.align([QuestionItem(q.id, q.text, q.context) for q in leaves])
+        # Causal feedback: each paper is mapped using feedback from earlier papers only.
+        results = aligner.align([QuestionItem(q.id, q.text, q.context, float(q.exam_index)) for q in leaves])
         th = thresholds_for(settings, backend.kind)
         for q, r in zip(leaves, results):
             q.alignment = r

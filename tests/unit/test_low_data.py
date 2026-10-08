@@ -173,3 +173,35 @@ def test_zero_papers_still_ranks_from_prior_knowledge(fast_settings):
     assert rep.targets == [] and rep.selected == "ensemble"
     info = rep.final_outputs["ensemble"].info
     assert info["weights"].get("general", 0) > 0 or info["weights"].get("coverage", 0) > 0
+
+
+def test_later_papers_never_change_earlier_predictions(fast_settings):
+    """Changing papers t.. (including how many topics they contain, which moves the automatic K) must not
+    change any model's prediction for paper t, meta models included."""
+    base = planted(10, seed=4)
+    other = planted(10, seed=4)
+    other.Y[6:] = 1.0  # every topic in every later paper: the median topics per paper changes
+    other.n_questions[6:] = 1.0
+    a = BacktestEngine(base, fast_settings).run(audit_leakage=False)
+    b = BacktestEngine(other, fast_settings).run(audit_leakage=False)
+    assert a.k != b.k  # the reporting K differs, the guarantee must still hold
+    for name, preds in a.predictions.items():
+        for t in range(1, 7):
+            if t in preds:
+                assert np.allclose(preds[t], b.predictions[name][t]), (name, t)
+
+
+def test_semantic_evidence_is_capped_per_paper():
+    """Six questions on a topic in one paper must not outweigh one question in each of four papers."""
+    exams = [ExamInfo(t, 2000 + t, str(2000 + t), 80.0, 2000 + t) for t in range(4)]
+    qs, qid = [], 0
+    for t in range(4):
+        qid += 1
+        qs.append(QuestionRecord(qid, t, "q", 5.0, "theory", [], [(1, 1.0)], semantic={1: 1.0}))
+    for _ in range(6):
+        qid += 1
+        qs.append(QuestionRecord(qid, 0, "q", 5.0, "theory", [], [(0, 1.0)], semantic={0: 0.9, 2: 0.1}))
+    panel = build_panel(exams, [0, 1, 2], ["a", "b", "c"], qs)
+    sem = panel.semantic_matrix()
+    assert sem.max() <= 1.0 + 1e-12
+    assert sem[:, 1].sum() > sem[:, 0].sum()  # four papers beat one long paper

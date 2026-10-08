@@ -63,7 +63,8 @@ class CourseService:
         }
 
     def update(self, course_id: int, *, name: str | None = None, code: str | None = None,
-               description: str | None = None, settings: dict[str, Any] | None = None) -> None:
+               description: str | None = None, settings: dict[str, Any] | None = None,
+               is_synthetic: bool | None = None) -> None:
         with self.app.db.session() as s:
             c = s.get(Course, course_id)
             if c is None:
@@ -74,6 +75,9 @@ class CourseService:
                 c.code = code.strip()[:60]
             if description is not None:
                 c.description = description
+            if is_synthetic is not None:
+                # Synthetic courses never train or update the cross-course model.
+                c.is_synthetic = bool(is_synthetic)
             if settings is not None:
                 deep_merge(defaults().as_dict(), settings)  # validates keys and types
                 c.settings = settings

@@ -40,11 +40,17 @@ def current_version(engine: Engine) -> int:
     return int(v or 1)
 
 
+# Courses created by the version 1 demo command, recognisable by their fixed name and description.
+OLD_DEMO_NAME = "%(synthetic demo)%"
+OLD_DEMO_DESCRIPTION = "Generated example data with planted patterns. Not real exams."
+
+
 def migrate(engine: Engine) -> list[str]:
     """Bring an existing database up to SCHEMA_VERSION. Returns the columns that were added."""
     added: list[str] = []
     insp = inspect(engine)
     tables = set(insp.get_table_names())
+    from_version = current_version(engine) if "course" in tables else SCHEMA_VERSION
     with engine.begin() as conn:
         for version in sorted(MIGRATIONS):
             for table, column, ddl in MIGRATIONS[version]:
@@ -54,6 +60,14 @@ def migrate(engine: Engine) -> list[str]:
                 if column not in existing:
                     conn.execute(text(f'ALTER TABLE "{table}" ADD COLUMN "{column}" {ddl}'))
                     added.append(f"{table}.{column}")
+        if from_version < 2 and "course" in tables and "course.is_synthetic" in added:
+            # Version 1 had no synthetic flag: mark the old demo course (and its papers) so its planted data
+            # never trains the cross-course model.
+            conn.execute(text("UPDATE course SET is_synthetic = 1 WHERE name LIKE :n OR description = :d"),
+                         {"n": OLD_DEMO_NAME, "d": OLD_DEMO_DESCRIPTION})
+            if "exam" in tables:
+                conn.execute(text("UPDATE exam SET source = 'demo' WHERE course_id IN "
+                                  "(SELECT id FROM course WHERE is_synthetic = 1)"))
         have = conn.execute(text("SELECT MAX(version) FROM schema_version")).scalar() if "schema_version" in tables else None
         if have is None or int(have) < SCHEMA_VERSION:
             note = ("added " + ", ".join(added)) if added else "new database"

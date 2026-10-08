@@ -34,6 +34,7 @@ class CoursePatch(BaseModel):
     code: str | None = None
     description: str | None = None
     settings: dict[str, Any] | None = None
+    is_synthetic: bool | None = None
 
 
 @router.get("/health")
@@ -89,6 +90,7 @@ def get_course(request: Request, course_id: int) -> dict[str, Any]:
 @router.patch("/courses/{course_id}")
 def patch_course(request: Request, course_id: int, body: CoursePatch) -> dict[str, Any]:
     CourseService(ctx(request)).update(course_id, name=body.name, code=body.code, description=body.description,
+                                       is_synthetic=body.is_synthetic,
                                        settings=body.settings)
     return CourseService(ctx(request)).get(course_id)
 

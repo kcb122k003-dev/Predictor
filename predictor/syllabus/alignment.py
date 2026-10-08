@@ -55,6 +55,10 @@ class QuestionItem:
     id: int
     text: str
     context: str = ""
+    # Time order of the question's paper. When every question has one, the feedback pass is causal:
+    # a paper is aligned with topic vectors expanded only from papers before it, so later papers never
+    # change how an earlier paper was mapped (no look-ahead in the backtest).
+    order: float | None = None
 
 
 @dataclass
@@ -198,6 +202,8 @@ class SyllabusAligner:
         qvecs = qvecs / np.where(norms == 0, 1.0, norms)
         self.node_vecs, self.node_terms, self.feedback = self.base_vecs.copy(), [set(t) for t in self.base_terms], {}
         results = [self._align_one(q, qvecs[i] @ self.node_vecs.T) for i, q in enumerate(questions)]
+        if feedback and self.fb_weight > 0 and all(q.order is not None for q in questions):
+            return self._align_causal(questions, qvecs, results)
         if feedback and self.fb_weight > 0 and self._apply_feedback(questions, qvecs, results):
             results = [self._align_one(q, qvecs[i] @ self.node_vecs.T) for i, q in enumerate(questions)]
             for r in results:
@@ -206,6 +212,27 @@ class SyllabusAligner:
                         r.reason += (f" Topic vocabulary includes terms from {len(self.feedback[m.topic_id])} "
                                      f"confidently mapped question(s).")
         return results
+
+    def _align_causal(self, questions: list[QuestionItem], qvecs: np.ndarray,
+                      first_pass: list[AlignmentResult]) -> list[AlignmentResult]:
+        """Feedback from earlier papers only: paper p is aligned after expanding topic vectors with the
+        confident (status A) first-pass matches of papers before p."""
+        results: list[AlignmentResult | None] = [None] * len(questions)
+        for o in sorted({q.order for q in questions}):
+            here = [i for i, q in enumerate(questions) if q.order == o]
+            before = [i for i, q in enumerate(questions) if q.order < o]
+            self.node_vecs, self.node_terms, self.feedback = (self.base_vecs.copy(),
+                                                              [set(t) for t in self.base_terms], {})
+            if before:
+                self._apply_feedback([questions[i] for i in before], qvecs[before], [first_pass[i] for i in before])
+            for i in here:
+                r = self._align_one(questions[i], qvecs[i] @ self.node_vecs.T)
+                for m in r.matches[:1]:
+                    if m.topic_id in self.feedback and r.status in ("A", "B"):
+                        r.reason += (f" Topic vocabulary includes terms from {len(self.feedback[m.topic_id])} "
+                                     f"confidently mapped question(s) in earlier papers.")
+                results[i] = r
+        return results  # type: ignore[return-value]
 
     def _apply_feedback(self, questions: list[QuestionItem], qvecs: np.ndarray,
                         results: list[AlignmentResult]) -> bool:

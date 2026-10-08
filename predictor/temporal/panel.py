@@ -61,8 +61,9 @@ class Panel:
     exact_repeat: np.ndarray  # (T, K) questions that repeat an earlier question exactly
     para_repeat: np.ndarray  # (T, K) questions that paraphrase an earlier question
     static: dict[str, np.ndarray] = field(default_factory=dict)  # (K,) syllabus properties
-    # (T, K) semantic soft counts: each in-syllabus question spreads one unit of evidence over the
-    # topics by similarity (pretrained/hybrid alignment scores), so near-misses also count a little.
+    # (T, K) semantic evidence: each in-syllabus question spreads one unit of evidence over the topics
+    # by similarity (pretrained/hybrid alignment scores), so near-misses also count a little. Per paper
+    # and item the value is 1 - prod(1 - share), at most 1: exam-level, not inflated by long papers.
     semantic: np.ndarray | None = None
     item_sim: np.ndarray | None = None  # (K, K) syllabus-only similarity between items (no exam text)
     format_prior: np.ndarray | None = None  # (K, F) format tendency from syllabus tags (no exam text)
@@ -141,7 +142,9 @@ def build_panel(exams: list[ExamInfo], item_ids: list[int], item_labels: list[st
                 soft[t, col] = max(soft[t, col], sim)
         for col, mass in q.semantic.items():
             if 0 <= col < K:
-                semantic[t, col] += mass
+                # Stored as sum of log(1 - mass); converted below to 1 - prod(1 - mass): the chance that at least
+                # one question of the paper was on the item. A paper counts at most once, however long it is.
+                semantic[t, col] += np.log1p(-min(float(mass), 0.999))
         total_w = sum(w for _, w in q.items) or 1.0
         for col, w in q.items:
             if not (0 <= col < K):
@@ -156,6 +159,7 @@ def build_panel(exams: list[ExamInfo], item_ids: list[int], item_labels: list[st
                 exact[t, col] += 1
             if q.para_repeat:
                 para[t, col] += 1
+    semantic = 1.0 - np.exp(semantic)
     return Panel(exams=exams, item_ids=list(item_ids), item_labels=list(item_labels), Y=Y, marks=marks,
                  soft=soft, formats=formats, n_questions=nq, exact_repeat=exact, para_repeat=para,
                  static=static or {}, item_unit=item_unit, unit_ids=unit_ids or [], layer=layer, semantic=semantic,

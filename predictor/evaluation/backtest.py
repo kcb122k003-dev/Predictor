@@ -128,6 +128,13 @@ def _gains(panel: Panel, t: int) -> np.ndarray:
     return np.where((panel.Y[t] > 0) & (g <= 0), 1.0 / max(panel.Y[t].sum(), 1), g)
 
 
+def _meta_metric(scores: np.ndarray, panel: Panel, t: int, k: int, primary: str, name: str) -> float:
+    rel = panel.Y[t]
+    if name == "random":
+        return expected_random(panel.K, int(rel.sum()), k, _gains(panel, t)).get(primary, math.nan)
+    return ranking_metrics(scores, rel, k, _gains(panel, t)).get(primary, math.nan)
+
+
 def ci95(values: list[float]) -> list[float | None]:
     arr = np.asarray([v for v in values if v == v], dtype=float)
     if arr.size < 2:
@@ -183,6 +190,13 @@ class BacktestEngine:
                                           getattr(m, "description", ""), m.role, m.scope, float(getattr(m, "df", 1.0)))
         runnable = [m for m in ordered_models(self.models) if reports[m.name].enabled]
 
+        k_cache: dict[int, int] = {}
+
+        def k_known(t: int) -> int:
+            if t not in k_cache:
+                k_cache[t] = resolve_top_k(panel.until(t + 1), settings)
+            return k_cache[t]
+
         def record(m: BaseModel, t: int, out: ModelOutput) -> None:
             ctx.predictions.setdefault(m.name, {})[t] = np.asarray(out.scores, dtype=float)
             ctx.outputs.setdefault(m.name, {})[t] = out
@@ -200,7 +214,10 @@ class BacktestEngine:
             else:
                 metrics = ranking_metrics(out.scores, rel, k, gains)
             reports[m.name].fold_metrics[t] = metrics
-            ctx.fold_metric.setdefault(m.name, {})[t] = metrics.get(self.primary, math.nan)
+            # Meta models (tuned decays, the selector, the ensemble) read these scores at later targets, so
+            # they use the K known after paper t, not K from the whole history (that would peek ahead).
+            ctx.fold_metric.setdefault(m.name, {})[t] = _meta_metric(out.scores, panel, t, k_known(t), self.primary,
+                                                                     m.name)
 
         for m in runnable:
             for t in all_targets:
@@ -393,7 +410,6 @@ def leakage_audit(panel: Panel, settings: Settings, models: list[BaseModel], t: 
     store = FeatureStore(scrambled, settings)
     ctx = ModelContext(panel=scrambled, store=store, settings=settings, seed=int(settings.models.random_seed),
                        general=general)
-    k = resolve_top_k(panel, settings)  # same k as the reference run
     primary = str(settings.models.primary_metric)
     first = max(int(settings.models.min_train_exams), 1)
     failures, checked = [], 0
@@ -407,8 +423,9 @@ def leakage_audit(panel: Panel, settings: Settings, models: list[BaseModel], t: 
             ctx.predictions.setdefault(m.name, {})[s] = np.asarray(out.scores, dtype=float)
             ctx.outputs.setdefault(m.name, {})[s] = out
             if s < t and out.info.get("available") is not False:
-                ctx.fold_metric.setdefault(m.name, {})[s] = ranking_metrics(out.scores, scrambled.Y[s], k,
-                                                                            _gains(scrambled, s))[primary]
+                k_s = resolve_top_k(scrambled.until(s + 1), settings)  # recomputed from the scrambled panel
+                ctx.fold_metric.setdefault(m.name, {})[s] = _meta_metric(out.scores, scrambled, s, k_s, primary,
+                                                                         m.name)
         ref = reference.get(m.name, {}).get(t)
         got = ctx.predictions.get(m.name, {}).get(t)
         if ref is not None and got is not None:

@@ -97,3 +97,27 @@ def test_migration_from_version_1_keeps_data(tmp_path):
     with db2.engine.connect() as conn:
         assert conn.execute(text("SELECT COUNT(*) FROM schema_version")).scalar() == 1
     db2.dispose()
+
+
+def test_migration_marks_the_old_demo_course_synthetic(tmp_path):
+    path = tmp_path / "old_demo.sqlite3"
+    con = sqlite3.connect(path)
+    con.executescript(FIXTURE.read_text(encoding="utf-8"))
+    con.execute("INSERT INTO course (id, name, code, description, created_at, settings) VALUES "
+                "(1, 'Fluid Mechanics (synthetic demo)', 'CE 501', "
+                "'Generated example data with planted patterns. Not real exams.', '2024-01-01', '{}')")
+    con.execute("INSERT INTO course (id, name, code, description, created_at, settings) VALUES "
+                "(2, 'Thermodynamics', 'ME 1', '', '2024-01-01', '{}')")
+    for eid, cid in ((1, 1), (2, 2)):
+        con.execute("INSERT INTO exam (id, course_id, title, subject, year, calendar, session, exam_type, exam_date, "
+                    "order_index, duration, examiner, instructions, structure, metadata_confidence, "
+                    "include_in_analysis, exclusion_reason, user_edited_fields, created_at) VALUES "
+                    f"({eid}, {cid}, 'P', '', 2020, 'AD', '', '', '', 2020.5, '', '', '[]', '{{}}', '{{}}', 1, '', '[]', "
+                    "'2024-01-01')")
+    con.commit()
+    con.close()
+    db = Database(path)
+    with db.session() as s:
+        assert s.get(Course, 1).is_synthetic is True and s.get(Course, 2).is_synthetic is False
+        assert s.get(Exam, 1).source == "demo" and s.get(Exam, 2).source == "upload"
+    db.dispose()

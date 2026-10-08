@@ -3,13 +3,14 @@
 Scores become probabilities through a calibrator on the *percentile rank* of each topic
 within its exam, fitted only on out-of-sample backtest predictions. Two calibrators compete:
 Platt scaling (two parameters) and isotonic regression (monotone, more flexible). For every
-held-out paper t, each calibrator is fitted on the papers before t and scored on t, so both
-the choice and the reported quality are out-of-sample.
+held-out paper t, each calibrator is fitted on the papers before t and scored on t.
 
 Probabilities are labelled as validated only when the nested Brier score beats the base
-rate (the share of topics that appeared in earlier papers) by more than one standard error
-of the per-paper difference. There is no fixed row count: with few papers the standard error
-is large and the ranking is shown as relative scores with an evidence band instead.
+rate (the share of topics that appeared in earlier papers) beyond a one-sided 95% t-bound on
+the per-paper differences. With two later papers that bound is 6.3 standard errors, so pure
+noise almost never passes; there is no fixed row count. The calibrator scored for paper t is
+the one that had the better log loss on the papers before t, so choosing between Platt and
+isotonic does not reuse the papers it is judged on.
 """
 
 from __future__ import annotations
@@ -23,6 +24,13 @@ from sklearn.isotonic import IsotonicRegression
 from ..config.settings import Settings
 from ..evaluation.metrics import brier, log_loss, mean_and_se, reliability
 from .base import percentile_rank
+
+
+def t_bound(n: int, level: float = 0.95) -> float:
+    """One-sided t quantile for n per-paper differences (inf when n < 2)."""
+    from scipy import stats
+
+    return float(stats.t.ppf(level, n - 1)) if n >= 2 else math.inf
 
 EPS = 0.01
 
@@ -171,17 +179,29 @@ def calibrate(predictions: dict[int, np.ndarray], Y: np.ndarray, targets: list[i
     if folds:
         losses = {m: log_loss(np.concatenate([nested[m][t] for t in folds]), np.concatenate([ys[t] for t in folds]))
                   for m in methods}
+        # The calibrator used for the forecast: best nested log loss over all folds.
         report.method = min(methods, key=lambda m: (losses[m], methods.index(m)))
         report.comparison = {m: {"nested_log_loss": _r(losses[m])} for m in methods}
-        p = np.concatenate([nested[report.method][t] for t in folds])
+        # The quality report must not reuse the folds that chose the method: for fold t the method is the
+        # one with the best log loss on folds before t (Platt before any comparison exists).
+        chosen: dict[int, str] = {}
+        for i, t in enumerate(folds):
+            before = folds[:i]
+            if not before:
+                chosen[t] = methods[0]
+                continue
+            prior = {m: log_loss(np.concatenate([nested[m][s] for s in before]), np.concatenate([ys[s] for s in before]))
+                     for m in methods}
+            chosen[t] = min(methods, key=lambda m: (prior[m], methods.index(m)))
+        p = np.concatenate([nested[chosen[t]][t] for t in folds])
         y = np.concatenate([ys[t] for t in folds])
         c = np.concatenate([clim[t] for t in folds])
         report.nested_brier = brier(p, y)
         report.climatology_brier = brier(c, y)
         report.brier_skill = 1.0 - report.nested_brier / report.climatology_brier if report.climatology_brier else math.nan
-        report.nested_log_loss = losses[report.method]
+        report.nested_log_loss = log_loss(p, y)
         report.reliability, report.ece = reliability(p, y, int(cfg.reliability_bins))
-        gains = [brier(clim[t], ys[t]) - brier(nested[report.method][t], ys[t]) for t in folds]
+        gains = [brier(clim[t], ys[t]) - brier(nested[chosen[t]][t], ys[t]) for t in folds]
         report.brier_gain, report.brier_gain_se = mean_and_se(gains)
 
     if _both(all_y):
@@ -198,12 +218,12 @@ def calibrate(predictions: dict[int, np.ndarray], Y: np.ndarray, targets: list[i
     if n == 0:
         report.reason = (f"{len(ordered)} held-out paper(s) is not enough to fit a calibrator on earlier papers and test "
                          f"it on a later one. Scores are relative, shown with an evidence band.")
-    elif math.isnan(report.brier_gain_se) or not (report.brier_gain > report.brier_gain_se):
+    elif math.isnan(report.brier_gain_se) or not (report.brier_gain > t_bound(n) * report.brier_gain_se):
         se = "n/a" if math.isnan(report.brier_gain_se) else f"{report.brier_gain_se:.3f}"
         report.reason = (f"Calibration was tested on {n} later paper(s): Brier {report.nested_brier:.3f} vs "
                          f"{report.climatology_brier:.3f} for the base rate (gain {report.brier_gain:+.3f}, standard "
-                         f"error {se}). That is not a reliable improvement, so scores are shown as relative scores "
-                         f"with an evidence band, not as probabilities.")
+                         f"error {se}). That does not clear the one-sided 95% bound for {n} paper(s), so scores are "
+                         f"shown as relative scores with an evidence band, not as probabilities.")
     else:
         report.valid = True
         report.reason = (f"Probabilities validated on {n} later papers ({report.method} calibration): Brier "
