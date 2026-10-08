@@ -186,14 +186,10 @@ primary_metric = "ndcg"
 top_k = "auto"
 top_k_min = 3
 top_k_max = 15
-# one_se = simplest model within one standard error of the best; best = highest mean.
-selection_rule = "one_se"
 random_seed = 13
-logistic_C = 0.5
 # Prior precision of the course-specific logistic model around the general model's weights
 # (per standardised coefficient). Larger = stays closer to the general model.
 course_prior_precision = 2.0
-ensemble_max_members = 3
 forest_trees = 60
 forest_min_leaf = 5
 gbm_max_iter = 100
@@ -215,9 +211,9 @@ min_metric_sd = 0.05
 # Topics with little history of their own lean on pretrained, syllabus and cross-course
 # components by up to (1 + gate_strength).
 gate_strength = 1.0
-# The ensemble is the final ranking unless a single method beat it on the backtest by more
-# than this many standard errors of the paired difference.
-replace_if_worse_by_se = 1.0
+# The ensemble is the final ranking unless "best single method chosen on earlier papers" beat
+# it on the same held-out papers beyond a one-sided t-bound at this confidence.
+replace_confidence = 0.95
 
 [calibration]
 # Probabilities are shown only when calibration fitted on earlier papers beat the base rate on
@@ -226,6 +222,7 @@ replace_if_worse_by_se = 1.0
 # Platt scaling and isotonic regression are compared by nested log loss.
 methods = ["platt", "isotonic"]
 bootstrap_samples = 200
+# Probability band shown with calibrated probabilities (percentiles of bootstrap calibrators).
 band_low = 0.10
 band_high = 0.90
 reliability_bins = 5

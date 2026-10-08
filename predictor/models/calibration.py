@@ -102,6 +102,7 @@ class CalibrationReport:
     comparison: dict = field(default_factory=dict)
     final: object | None = None
     bootstrap: list = field(default_factory=list)
+    band: tuple[float, float] = (0.10, 0.90)
 
     def probabilities(self, scores: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
         if self.final is None:
@@ -110,7 +111,7 @@ class CalibrationReport:
         p = self.final.predict(x)
         if self.bootstrap:
             sims = np.vstack([c.predict(x) for c in self.bootstrap])
-            low, high = np.percentile(sims, [10, 90], axis=0)
+            low, high = np.percentile(sims, [100 * self.band[0], 100 * self.band[1]], axis=0)
             low, high = np.minimum(low, p), np.maximum(high, p)
         else:
             low, high = p, p
@@ -144,7 +145,8 @@ def calibrate(predictions: dict[int, np.ndarray], Y: np.ndarray, targets: list[i
     ordered = sorted(xs)
     all_x = np.concatenate([xs[t] for t in ordered]) if ordered else np.zeros(0)
     all_y = np.concatenate([ys[t] for t in ordered]) if ordered else np.zeros(0)
-    report = CalibrationReport(valid=False, reason="", n_rows=int(len(all_y)), n_positive=int(all_y.sum()))
+    report = CalibrationReport(valid=False, reason="", n_rows=int(len(all_y)), n_positive=int(all_y.sum()),
+                               band=(float(cfg.band_low), float(cfg.band_high)))
     if not ordered:
         report.reason = ("No held-out paper exists yet, so probabilities cannot be checked. The ranking is shown as "
                          "relative scores with an evidence band.")

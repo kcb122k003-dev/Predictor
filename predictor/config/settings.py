@@ -32,6 +32,8 @@ class SettingsError(ValueError):
 DEPRECATED_KEYS = frozenset({
     "models.sufficiency",  # binary data-size gates, replaced by evidence-aware weighting
     "calibration.min_rows", "calibration.min_positives",  # replaced by a nested significance check
+    "ensemble.replace_if_worse_by_se",  # replaced by ensemble.replace_confidence
+    "models.selection_rule", "models.logistic_C", "models.ensemble_max_members",  # old single-model selection
 })
 
 

@@ -141,7 +141,7 @@ def ordered_models(models: list[BaseModel]) -> list[BaseModel]:
     """Base models first, then tuned models, then ensembles (each meta model needs the ones before it)."""
     base = [m for m in models if not m.meta]
     meta = [m for m in models if m.meta]
-    meta.sort(key=lambda m: 1 if m.role == "ensemble" else 0)
+    meta.sort(key=lambda m: getattr(m, "meta_order", 2 if m.role == "ensemble" else 0))
     return base + meta
 
 
@@ -249,47 +249,55 @@ class BacktestEngine:
 
 def select_final(reports: dict[str, ModelReport], primary: str, targets: list[int], settings: Settings
                  ) -> tuple[str, str, str]:
-    """The ensemble, unless a single visible method is reliably better on the backtest."""
+    """The ensemble, unless the out-of-sample best-single-method procedure beat it reliably.
+
+    "best_single" picks, for every held-out paper, the method that did best on the papers
+    before it, so its scores are honest. Picking the winner after seeing all folds would
+    favour whichever method got lucky; with 20 candidates and a handful of folds that happens
+    often. The ensemble is replaced only when best_single beats it on the same papers by more
+    than a one-sided t-bound at ``ensemble.replace_confidence`` (default 95%).
+    """
     metric_label = f"{primary.upper()}@K"
-    singles = [r for r in reports.values() if r.enabled and not r.hidden and r.name not in ("random", FINAL_MODEL)
-               and r.fold_metrics and not math.isnan(r.mean.get(primary, math.nan))]
+    singles = [r for r in reports.values() if r.enabled and not r.hidden and r.role != "ensemble"
+               and r.name not in ("random", "best_single") and r.fold_metrics
+               and not math.isnan(r.mean.get(primary, math.nan))]
+    best_name = max(singles, key=lambda r: (r.mean[primary], -r.complexity)).name if singles else FINAL_MODEL
     ens = reports.get(FINAL_MODEL)
-    has_ens = ens is not None and ens.enabled
-    if not targets or not singles:
-        if has_ens:
-            return (FINAL_MODEL, FINAL_MODEL,
-                    "No earlier paper is available to compare methods, so the evidence-aware ensemble is used with its "
-                    "prior weights: pretrained semantics, syllabus structure, the cross-course model and Bayesian "
-                    "recurrence, each weighted by how much this course's data can support it.")
+    sel = reports.get("best_single")
+    if ens is None or not ens.enabled:
+        if sel is not None and sel.enabled and sel.fold_metrics:
+            return "best_single", best_name, "The ensemble is not enabled; the best single method on earlier papers is used."
         fallback = next((n for n in ("beta_binomial", "frequency") if n in reports), next(iter(reports)))
-        return fallback, fallback, "No backtest folds; the Bayesian recurrence rate is used."
-    best = max(singles, key=lambda r: (r.mean[primary], -r.complexity))
-    if not has_ens or not ens.fold_metrics:
-        return _one_se(singles, best, primary, targets, metric_label)
-    common = [t for t in targets if t in ens.fold_metrics and t in best.fold_metrics]
-    diffs = [ens.fold_metrics[t][primary] - best.fold_metrics[t][primary] for t in common]
-    d, se = mean_and_se(diffs)
-    threshold = float(settings.ensemble.replace_if_worse_by_se)
+        return fallback, best_name, "The ensemble is not enabled; the Bayesian recurrence rate is used."
+    if not targets or not ens.fold_metrics:
+        return (FINAL_MODEL, best_name,
+                "No earlier paper is available to compare methods, so the evidence-aware ensemble is used with its "
+                "prior weights: pretrained semantics, syllabus structure, the cross-course model and Bayesian "
+                "recurrence, each weighted by how much this course's data can support it.")
+    if sel is None or not sel.fold_metrics:
+        return FINAL_MODEL, best_name, "The evidence-aware ensemble is used."
+    common = [t for t in targets if t in ens.fold_metrics and t in sel.fold_metrics]
+    e = [ens.fold_metrics[t][primary] for t in common]
+    b = [sel.fold_metrics[t][primary] for t in common]
+    d, se = mean_and_se([x - y for x, y in zip(e, b)])
     n = len(common)
-    if not math.isnan(se) and d < -threshold * se:
-        chosen, _, why = _one_se(singles, best, primary, targets, metric_label)
-        return chosen, best.name, (f"The evidence-aware ensemble scored {ens.mean[primary]:.3f} {metric_label}, "
-                                   f"{-d:.3f} below {best.display} ({best.mean[primary]:.3f}) over {n} held-out papers, "
-                                   f"more than one standard error ({se:.3f}). A single method is used instead: {why}")
+    level = float(settings.ensemble.replace_confidence)
+    bound = float(stats.t.ppf(level, n - 1)) if n >= 2 else math.inf
+    e_mean, b_mean = float(np.mean(e)), float(np.mean(b))
     se_txt = "n/a with one paper" if math.isnan(se) else f"{se:.3f}"
-    if d >= 0:
-        verdict = (f"It scored {ens.mean[primary]:.3f} {metric_label} over {n} held-out paper(s), {d:+.3f} against the "
-                   f"best single method ({best.display}, {best.mean[primary]:.3f}; standard error of the difference "
-                   f"{se_txt}).")
-    else:
-        verdict = (f"It scored {ens.mean[primary]:.3f} {metric_label} over {n} held-out paper(s), {d:+.3f} against the "
-                   f"best single method ({best.display}, {best.mean[primary]:.3f}); the gap is within one standard error "
-                   f"({se_txt}), and the best single method was picked after seeing these same papers, so it is "
-                   f"not a reliable winner.")
+    compare = (f"On {n} held-out paper(s) the ensemble scored {e_mean:.3f} {metric_label} and the best single method "
+               f"chosen on earlier papers scored {b_mean:.3f} (difference {d:+.3f}, standard error {se_txt}).")
+    if not math.isnan(se) and se > 0 and -d > bound * se:
+        return ("best_single", best_name,
+                f"A single method is used: {compare} That is beyond the one-sided {level:.0%} bound, so on this course "
+                f"picking the method that did best on earlier papers has worked better than combining them.")
     rnd = reports.get("random")
-    if rnd is not None and rnd.mean:
-        verdict += f" Random selection scores {rnd.mean.get(primary, float('nan')):.3f} on the same papers."
-    return FINAL_MODEL, best.name, "The evidence-aware ensemble is used. " + verdict
+    tail = f" Random selection scores {rnd.mean.get(primary, float('nan')):.3f} on the same papers." \
+        if rnd is not None and rnd.mean else ""
+    if d >= 0:
+        return FINAL_MODEL, best_name, "The evidence-aware ensemble is used. " + compare + tail
+    return (FINAL_MODEL, best_name, "The evidence-aware ensemble is used. " + compare + " The gap is not reliable "
+            f"(within the one-sided {level:.0%} bound), so the combined ranking is kept." + tail)
 
 
 def _one_se(singles: list[ModelReport], best: ModelReport, primary: str, targets: list[int], metric_label: str

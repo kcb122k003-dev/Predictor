@@ -1,8 +1,12 @@
 """Models that combine or choose among other models using earlier backtest folds only.
 
 * ``TunedModel`` picks a hyperparameter (window length, half-life, decay strategy) for
-  target t from the folds before t. It keeps the default unless another variant is ahead
-  by more than one standard error of the paired difference, so two lucky folds cannot move it.
+  target t from the folds before t. It keeps the default unless another variant is ahead by
+  more than a one-sided 95% t-bound on the paired difference (with two earlier folds that
+  needs a gap about six standard errors wide, so a couple of lucky folds rarely move it).
+* ``BestSingleModel`` is the honest version of "use whichever method did best": for target t
+  it uses the method with the best mean on folds before t. Its own fold scores are therefore
+  out-of-sample, and they are what the ensemble is compared with.
 * ``EvidenceEnsemble`` is the final ranking model:
 
       S(x) = sum_m w_m(x) * S_m(x) / sum_m w_m(x)
@@ -33,6 +37,7 @@ import math
 from typing import Any
 
 import numpy as np
+from scipy import stats
 
 from ..evaluation.metrics import mean_and_se
 from .base import BaseModel, ModelContext, ModelOutput, percentile_rank
@@ -42,8 +47,14 @@ def _folds_before(ctx: ModelContext, name: str, t: int) -> dict[int, float]:
     return {s: v for s, v in ctx.fold_metric.get(name, {}).items() if s < t and v == v}
 
 
+def t_bound(n: int, level: float = 0.95) -> float:
+    """One-sided t quantile for n paired differences (inf when n < 2)."""
+    return float(stats.t.ppf(level, n - 1)) if n >= 2 else math.inf
+
+
 class TunedModel(BaseModel):
     meta = True
+    meta_order = 0
 
     def __init__(self, name: str, display: str, variants: list[str], default: str, complexity: int = 2,
                  description: str = "", family: str = "baseline", role: str = "baseline", df: float = 1.0):
@@ -69,10 +80,12 @@ class TunedModel(BaseModel):
             return self.default, "default (no earlier paper shows a reliably better variant)"
         common = [s for s in folds[best] if s in folds[self.default]]
         diff, se = mean_and_se([folds[best][s] - folds[self.default][s] for s in common])
-        if math.isnan(se) or diff <= se:
+        bound = t_bound(len(common))
+        if math.isnan(se) or not diff > bound * se:
             return self.default, (f"default kept: '{best}' was ahead by {diff:.3f} on {len(common)} earlier paper(s), "
-                                  f"within one standard error")
-        return best, f"'{best}' ahead of the default by {diff:.3f} ± {se:.3f} on {len(common)} earlier papers"
+                                  f"not reliably (one-sided 95% bound)")
+        return best, (f"'{best}' ahead of the default by {diff:.3f} ± {se:.3f} on {len(common)} earlier papers "
+                      f"(beyond the one-sided 95% bound)")
 
     def predict(self, t: int, ctx: ModelContext) -> ModelOutput:
         chosen, why = self.choose(t, ctx)
@@ -84,8 +97,45 @@ class TunedModel(BaseModel):
                            inner.contribution_names if inner is not None else None)
 
 
+class BestSingleModel(BaseModel):
+    """For each target, the single method with the best mean metric on the folds before it."""
+
+    name, display, family, complexity, meta, role = ("best_single", "Best single method (chosen on earlier papers)",
+                                                     "selection", 4, True, "baseline")
+    meta_order = 1
+    description = ("For each held-out paper, uses whichever single method ranked the papers before it best. Its scores "
+                   "are out-of-sample, so it is a fair rival for the ensemble.")
+
+    def __init__(self, candidates: list[str], default: str):
+        self.candidates = list(candidates)
+        self.default = default
+
+    def choose(self, t: int, ctx: ModelContext) -> tuple[str, int]:
+        best, best_mean, n_best = None, -math.inf, 0
+        for name in self.candidates:
+            if t not in ctx.predictions.get(name, {}):
+                continue
+            out = ctx.outputs.get(name, {}).get(t)
+            if out is not None and out.info.get("available") is False:
+                continue
+            f = _folds_before(ctx, name, t)
+            if f:
+                m = float(np.mean(list(f.values())))
+                if m > best_mean + 1e-12:
+                    best, best_mean, n_best = name, m, len(f)
+        if best is None:
+            best = self.default if t in ctx.predictions.get(self.default, {}) else next(
+                n for n in self.candidates if t in ctx.predictions.get(n, {}))
+        return best, n_best
+
+    def predict(self, t: int, ctx: ModelContext) -> ModelOutput:
+        chosen, n = self.choose(t, ctx)
+        return ModelOutput(ctx.predictions[chosen][t], {"chosen": chosen, "folds_used": n})
+
+
 class EvidenceEnsemble(BaseModel):
     name, display, family, complexity, meta, role = "ensemble", "Evidence-aware ensemble", "ensemble", 5, True, "ensemble"
+    meta_order = 2
     description = ("Combines every available component. Each weight multiplies a reliability prior (exams versus the "
                    "number of parameters the component estimates from this course) by the component's measured skill "
                    "on earlier papers; topics with little history lean more on pretrained, syllabus and cross-course "

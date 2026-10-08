@@ -7,7 +7,7 @@ from .base import BaseModel
 from .components import (BayesianRecurrenceModel, CooccurrenceModel, CourseLogisticModel, CoverageModel,
                          GeneralRankingModel, QuestionTypeModel, SemanticComponent, TemporalModel)
 from .learned import GradientBoostingModel, PooledHMMModel, RandomForestModel
-from .meta import EvidenceEnsemble, TunedModel
+from .meta import BestSingleModel, EvidenceEnsemble, TunedModel
 from .statistical import (EwmaModel, FreqRecencyModel, FrequencyModel, LastExamModel, LinearDecayModel, MarkovModel,
                           RandomModel, WindowModel)
 
@@ -106,6 +106,10 @@ def build_models(settings: Settings) -> list[BaseModel]:
     if want("hmm"):
         add(PooledHMMModel())
     if want("ensemble"):
+        # The out-of-sample rival of the ensemble: the best single method chosen on earlier papers.
+        candidates = [m.name for m in models if not m.hidden and m.name != "random"]
+        if candidates:
+            add(BestSingleModel(candidates, "beta_binomial" if "beta_binomial" in candidates else candidates[0]))
         cfg = settings.ensemble
         members = [n for n in COMPONENT_ORDER if n in by_name]
         add(EvidenceEnsemble(members, {n: by_name[n].df for n in members},
