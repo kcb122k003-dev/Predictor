@@ -20,17 +20,27 @@ nothing needs an internet connection after installation.
 3. **Treats the syllabus as a hard boundary.** Each question is matched to the course contents
    and labelled A (clearly in), B (probably in), C (uncertain) or D (outside). Questions outside
    the current syllabus never drive a prediction; they are listed separately with the reason.
-4. **Tests prediction methods on your own history.** Each past paper is predicted using only the
-   papers before it. About fifteen methods compete, from plain frequency to Bayesian, survival,
-   Markov, logistic regression, gradient boosting, an HMM and an ensemble. Complex methods are
-   switched off when there is too little data, and the simplest method within one standard error
-   of the best is used.
+4. **Tests prediction methods on your own history.** Each past paper from the second onward is
+   predicted using only the papers before it. Nothing switches off because a course is small:
+   there is no minimum number of papers for testing or for any of the thirteen components. They
+   include recency-frequency, hierarchical Bayesian recurrence, semantic
+   evidence from a bundled pretrained model, syllabus coverage, a general ranking model trained on
+   simulated courses, a course-specific logistic model pulled toward that general model, and
+   Markov, HMM and tree models. An evidence-aware ensemble weights each one by how much evidence
+   supports it and how well it ranked earlier papers. The app marks each component ACTIVE, LIMITED,
+   DOWNWEIGHTED, UNAVAILABLE (an input it needs does not exist) or REFERENCE (a baseline kept for
+   comparison). A single method replaces the ensemble only if it beat the ensemble on earlier
+   papers by more than one standard error.
 5. **Explains every prediction.** Recent and total appearances, gaps, how often topics in this
    course reappear after a given gap, marks, formats, signal contributions, and "why not" notes
-   for low-ranked topics. Percentages are shown as probabilities only when calibration was
-   validated on held-out papers.
+   for low-ranked topics. Each topic also shows a rank range, an uncertainty level and an evidence
+   strength, because a high score does not mean the app is certain. Percentages are shown as
+   probabilities only when calibration beat the base rate on later held-out papers by more than one
+   standard error; otherwise you see relative scores.
 6. **Suggests grounded question formulations and practice papers**, built from your course's own
-   wording and syllabus phrases. It never invents numbers for numerical questions.
+   wording and syllabus phrases. It never invents numbers for numerical questions. Topics are
+   ranked first, and each formulation must pass syllabus, topic, semantic and question-type checks
+   before it is shown.
 
 ## Quick start
 
@@ -64,25 +74,36 @@ Install Tesseract for scanned papers: `sudo apt install tesseract-ocr` (Ubuntu/D
 
 ## What results look like on the demo course
 
-12 synthetic papers, 144 questions, 25 syllabus topics, analysed in about 7 seconds on a
-4-core laptop:
+12 synthetic papers, 144 questions, 25 syllabus topics, analysed in about 10 seconds on a
+4-core machine. The scores below compare each method's ranking with the topics the app itself
+mapped the held-out questions to, which is all a real course can measure:
 
-| Method | NDCG@11 on 9 held-out papers |
+| Method | NDCG@11 on 11 held-out papers |
 |---|---:|
-| Pooled hazard (time since last appearance) | 0.729 |
-| Semantic soft recurrence | 0.716 |
-| Ensemble | 0.713 |
-| **Recent-window frequency (selected: simpler, within one standard error)** | **0.712** |
-| Most frequent topics | 0.698 |
-| Logistic regression | 0.653 |
-| Random selection (exact expectation) | 0.461 |
+| General ranking model (cross-course) | 0.758 |
+| **Evidence-aware ensemble (final ranking)** | **0.754** |
+| Semantic evidence (pretrained) | 0.749 |
+| Hierarchical Bayesian recurrence | 0.724 |
+| Recent-window frequency | 0.720 |
+| Most frequent topics | 0.709 |
+| Random selection (exact expectation) | 0.460 |
 
-* Syllabus alignment put 128 of 140 in-syllabus questions (91.4%) on the right topic with the
-  offline model; all 4 questions from an old syllabus were marked "outside" and none of the 140
-  in-syllabus questions was.
-* The ablation study shows extra features did not help the logistic model on 12 papers. The app
-  reports that instead of hiding it, and does not select the logistic model.
-* Calibrated probabilities beat the base rate on held-out papers (Brier 0.199 vs 0.251).
+Against the generator's planted true topics, which the app cannot see, the ensemble is level with
+plain frequency (slightly lower, within one standard error), so the demo does not show a gain
+there. The gains over frequency are measured on simulated courses; see
+[Low-data inference](docs/LOW_DATA_INFERENCE.md#8-results).
+
+* The general model's small lead over the ensemble is within one standard error (0.013), so the
+  app keeps the ensemble.
+* Syllabus alignment put 127 of 140 in-syllabus questions (90.7%) on the right topic with the
+  default hybrid of the pretrained model and TF-IDF (TF-IDF alone: 128). All 4 questions from an old
+  syllabus were marked "outside" and none of the 140 in-syllabus questions was.
+* In the staged ablation, only two steps improved NDCG by more than one standard error: adding
+  Bayesian smoothing to frequency and recency, and the step to the full ensemble. The other steps changed it by
+  less than 0.01, and the app labels them "not reliable" instead of hiding them.
+* With 12 papers the run reports "Low-data advanced inference": the course logistic and tree models
+  run as LIMITED with 2-3% of the weight each.
+* Calibrated probabilities beat the base rate on 10 later held-out papers (Brier 0.182 vs 0.249).
 
 Your own course will give different numbers; the Model performance page shows them.
 
@@ -90,7 +111,11 @@ Your own course will give different numbers; the Model performance page shows th
 
 * [User guide](docs/USER_GUIDE.md): installation, every screen, reading the results, troubleshooting.
 * [Architecture and design analysis](docs/ARCHITECTURE.md): the specification review, contradictions
-  and how they were resolved, data-size limits, pipeline, schema, backtesting, success metrics.
+  and how they were resolved, pipeline, schema, backtesting, success metrics.
+* [Low-data inference](docs/LOW_DATA_INFERENCE.md): how the ranking engine works with two, five or
+  fifteen papers. It covers the Bayesian recurrence, the general and course models, ensemble weights,
+  component statuses, calibration, rank intervals, ablation, the new database tables and migrations,
+  measured results and limitations. It replaces the old minimum-paper rules.
 * [Developer guide](docs/DEVELOPER_GUIDE.md): code map, adding models, file formats or question
   types, tests, API.
 
@@ -103,28 +128,48 @@ predictor doctor                               check the installation
 predictor ingest FILE... --kind exam|syllabus [--course ID]
 predictor analyze COURSE_ID
 predictor export RUN_ID --format pdf|xlsx|csv|json [--out FILE]
-predictor models download                      optional neural embeddings (uses the internet once)
+predictor models download                      optional larger sentence-transformer (uses the internet once)
 ```
 
 Add `--data-dir PATH` before the command to use another data folder (default `~/ExamPredictorData`).
+
+You do not need `models download`: the bundled pretrained model works offline at every course size.
+The download needs the `neural` extra (`pip install -e ".[neural]"`). Once the model is on disk, the
+default settings use it for syllabus alignment and for finding reworded repeats of past questions.
 
 ## Privacy
 
 * The server listens on 127.0.0.1 only.
 * Uploaded files, the database and logs live in your data folder.
 * No telemetry, no cloud OCR, no remote models. `allow_external_services` is off and nothing in the
-  app uses the network. Downloading the optional neural model is a separate command you run yourself.
+  app uses the network.
+* The pretrained semantic model (WordLlama, MIT licence) ships inside the `wordllama` package that
+  installation adds. The app reads it from disk and downloads nothing. Downloading the optional
+  larger sentence-transformer is a separate command you run yourself.
+* The general ranking model can learn from the other real courses in your library, on your
+  machine. One course's history never enters another course's statistics, and synthetic courses,
+  including the demo, are never used for this.
 
 ## Tests
 
 ```bash
 pip install -e ".[ocr,dev]"
-pytest                    # unit, integration and regression tests (about 1-2 minutes)
+pytest                    # unit, integration and regression tests (several minutes; integration tests run full analyses)
 ```
 
 ## Known limitations
 
 * OCR reads printed text well, equations poorly and handwriting badly. Such regions are flagged for
   review; fix them in the Review screen.
-* With fewer than about 6 papers, every prediction is highly uncertain and the app says so.
+* With one held-out paper the app cannot measure accuracy, and with fewer than about five the
+  confidence interval is wider than most differences between methods. The app still ranks topics,
+  shows wide rank ranges and says so.
+* On the demo course the ensemble does not beat plain frequency against the planted true topics.
+  Gains are measured on simulated courses, which are only as realistic as their generators.
+* The general ranking model is trained on simulations. Until your library holds other real
+  courses, it reflects generic examiner behaviour, not your institution's.
+* The bundled pretrained model is a static word-embedding model. It found the right topic for 11 of
+  26 reworded test questions, fewer than character n-grams (14), so reworded repeats are matched
+  by character n-grams and word overlap unless you download a sentence-transformer.
 * Predicted question formulations are examples of likely forms, not the exam's wording.
+* The [full list](docs/LOW_DATA_INFERENCE.md#11-limitations) is in the low-data inference document.
