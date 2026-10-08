@@ -183,8 +183,9 @@ pytest                    # unit, integration and regression tests (several minu
   `models.use_simulated_prior = false` (or clear "Use the simulated cross-course prior" in
   Settings) to drop the simulations: the general model then learns only from other real courses
   in your library, and with none it is UNAVAILABLE and the other components share its weight.
-* The bundled pretrained model is a static word-embedding model. It found the right topic for 11 of
-  26 reworded test questions, fewer than character n-grams (14), so reworded repeats are matched
-  by character n-grams and word overlap unless you download a sentence-transformer.
+* The bundled pretrained model is a static word-embedding model. For 26 reworded test questions,
+  the nearest past question it found was on the same topic for 11, against 14 with character
+  n-grams, so reworded repeats are matched by character n-grams and word overlap unless you
+  download a sentence-transformer.
 * Predicted question formulations are examples of likely forms, not the exam's wording.
 * The [full list](docs/LOW_DATA_INFERENCE.md#11-limitations) is in the low-data inference document.

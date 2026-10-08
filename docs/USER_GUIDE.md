@@ -56,8 +56,8 @@ Apart from installing the packages, this download is the only step that uses the
 Afterwards the app picks the model up automatically. You do not need it: the bundled model covers
 general English, but it recognises technical rewording less well. With the larger model installed,
 the app also uses it to detect reworded repeat questions. Without it, repeat detection uses
-character matching, which matched more reworded questions correctly than the bundled model did in
-the measurements (14 of 26 against 11).
+character matching: for 26 reworded test questions, the nearest past question it found was on the
+same topic for 14, against 11 with the bundled model.
 
 ## 2. First launch
 

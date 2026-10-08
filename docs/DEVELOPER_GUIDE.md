@@ -161,12 +161,13 @@ Three subtler points (the first two are documented in ARCHITECTURE.md):
   moved the status counts from A 109 / B 27 / C 4 / D 4 to A 104 / B 30 / C 6 / D 4. With the rest
   of the code unchanged, it moved the backtest scores against mapped labels by -0.072
   (co-occurrence) to +0.016 (coverage): the ensemble fell by 0.023, frequency by 0.031 and semantic
-  evidence by 0.033. Most old scores were optimistic because the held-out paper's own wording fed
+  evidence by 0.033, while coverage, the course logistic (+0.002) and the random forest (+0.003)
+  went up. Most old app-label scores were optimistic because the held-out paper's own wording fed
   the alignment.
 * Question similarity for recurrence uses stateless character n-grams (or a downloaded
   sentence-transformer), so no statistics from later papers enter earlier comparisons. The bundled
-  WordLlama model is not used here: on 26 reworded test questions it found the right topic for 11,
-  against 14 for character n-grams.
+  WordLlama model is not used here: for 26 reworded test questions, the nearest past question it
+  found in the demo bank was on the same topic for 11, against 14 with character n-grams.
 * The general ranking model never learns from the course it predicts. `general_model_for` updates
   the shipped prior with the scale-free rows of other real courses only, and skips synthetic
   courses. Course A's rows can change the general model used for course B, never course B's panel,

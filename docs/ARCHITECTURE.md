@@ -41,7 +41,7 @@ The specification is long, but most of it reduces to five engineering problems:
 
 | # | Tension in the spec | Decision |
 |---|---|---|
-| D1 | "Works fully offline" vs "modern neural embeddings". Pretrained models must be downloaded once, and the download host may be unreachable. | The default embedding backend is a TF-IDF model over word stems plus character n-grams, fitted locally. It needs no download. A neural backend (sentence-transformers) is optional and is enabled only after an explicit `predictor models download` command. The app never downloads anything on its own.<br><br>**Revised in the low-data upgrade:** TF-IDF is no longer the only model that works without a download. The default backend is `auto`: a sentence-transformer if you downloaded one, otherwise a hybrid of the bundled WordLlama model and syllabus-fitted TF-IDF, otherwise TF-IDF alone. WordLlama (256-dimensional static embeddings, MIT licence) ships inside the `wordllama` pip package, so it needs no download and runs at every course size. The hybrid cosine is 0.3 × pretrained + 0.7 × TF-IDF (`embeddings.hybrid_pretrained_weight`). On the demo course the hybrid, with the causal feedback pass described in section 9, puts 131 of 140 in-syllabus questions on the right topic and keeps all 4 old-syllabus questions outside. Repeat detection still uses character n-grams unless a sentence-transformer is installed, because character n-grams found the right topic for more reworded questions (14 of 26, against 11 for WordLlama). The app still downloads nothing on its own. |
+| D1 | "Works fully offline" vs "modern neural embeddings". Pretrained models must be downloaded once, and the download host may be unreachable. | The default embedding backend is a TF-IDF model over word stems plus character n-grams, fitted locally. It needs no download. A neural backend (sentence-transformers) is optional and is enabled only after an explicit `predictor models download` command. The app never downloads anything on its own.<br><br>**Revised in the low-data upgrade:** TF-IDF is no longer the only model that works without a download. The default backend is `auto`: a sentence-transformer if you downloaded one, otherwise a hybrid of the bundled WordLlama model and syllabus-fitted TF-IDF, otherwise TF-IDF alone. WordLlama (256-dimensional static embeddings, MIT licence) ships inside the `wordllama` pip package, so it needs no download and runs at every course size. The hybrid cosine is 0.3 × pretrained + 0.7 × TF-IDF (`embeddings.hybrid_pretrained_weight`). On the demo course the hybrid, with the causal feedback pass described in section 9, puts 131 of 140 in-syllabus questions on the right topic and keeps all 4 old-syllabus questions outside. TF-IDF alone scores the same (131 of 140, 4 of 4 outside), so the demo does not show the hybrid mapping more questions correctly; the hybrid leaves fewer questions at status C (6 against 9). Repeat detection still uses character n-grams unless a sentence-transformer is installed, because they matched reworded questions better: for 26 reworded questions, the nearest past question in the demo bank was on the same topic for 14 with character n-grams and for 11 with WordLlama. That check measures repeat matching, not syllabus alignment. The app still downloads nothing on its own. |
 | D2 | "Use Markov, HMM, survival, gradient boosting, calibration" vs "you will often have 5 to 15 exams". A single topic with 10 exams has 10 binary observations. No per-topic model can be fitted on that. | Every learned model is **pooled across topics**: one row per (exam, topic). Ten exams and 40 topics give about 280 training rows after warm-up. Per-topic parameters use empirical-Bayes shrinkage toward the pooled estimate. Complex models are gated by data-sufficiency rules and must also win the backtest.<br><br>**Revised in the low-data upgrade:** the data-sufficiency gates (`models.sufficiency`) were removed and no other threshold replaced them. Every component runs on every backtest fold at every course size. Instead of a gate, each component gets a reliability prior that grows with the number of papers and shrinks with the number of parameters it estimates from this course (section 3). That prior is multiplied by the quality of the component's inputs (mapping confidence, parse confidence, share of marks known, missing calendar years, formats seen, syllabus weight source), and the ensemble weight also depends on how well the component ranked earlier papers. A component reports "unavailable" only when an input it needs does not exist. Pooling stays: the hierarchical Bayesian recurrence pools at course, unit and topic level, and the course logistic model is pulled toward a general ranking model trained on simulated courses and other real courses in your library. Set `models.use_simulated_prior = false` and the simulated part is dropped. A component no longer has to win the backtest to contribute. Old settings files that still contain `models.sufficiency` load normally and the key is ignored. See section 3 and [Low-data inference](LOW_DATA_INFERENCE.md#2-what-replaced-the-cutoff). |
 | D3 | "Calibrated probabilities" vs tiny validation sets. Isotonic regression on 200 points overfits. | Platt scaling (two parameters) on the percentile rank of each topic, fitted only on out-of-sample backtest predictions. Probabilities are shown only when nested calibration beats the base-rate Brier score. Otherwise the UI shows "relative score" and says why.<br><br>**Revised in the low-data upgrade:** Platt scaling and isotonic regression now compete. For each held-out paper, each calibrator is fitted on earlier held-out papers only, and the one with the lower nested log loss is used. The fixed row and positive-count minimums (`calibration.min_rows`, `calibration.min_positives`) were removed. Probabilities are shown only when the nested Brier gain over the base rate clears a one-sided 95% t-bound: the gain must exceed the t quantile for the number of papers times the standard error of the per-paper gain. With few papers both the quantile and the standard error are large, so you see relative scores with a rank interval and an evidence strength instead. |
 | D4 | Backtests on very few exams. With 5 exams and 3 warm-up exams you get 2 folds; a metric averaged over 2 folds is close to noise. | The backtest reports the standard error for every metric and the number of folds. Model selection uses the one-standard-error rule, which prefers the simpler model when the gap is inside the noise. Below 4 exams, no backtest runs and the app uses transparent statistics only.<br><br>**Revised in the low-data upgrade:** there is no minimum number of exams for backtesting. The backtest is rolling-origin over every fold: with T papers, papers 2 to T are each predicted from the papers before them, which gives T − 1 folds (`models.min_train_exams` defaults to 1). One paper gives no fold, and the app says accuracy cannot be measured yet. Each report gives the number of folds, the fold-to-fold standard deviation, a 95% t-interval for the mean metric, and paired comparisons with random, frequency, recency-frequency and Bayesian recurrence. The one-standard-error rule no longer chooses the final ranking; it survives only in the question-type forecast (layer 2) and in `select_model`, a compatibility function the analysis no longer calls. The evidence-aware ensemble is the final ranking unless `best_single` beat it on the same held-out papers beyond a one-sided 95% t-bound of the paired differences (`ensemble.replace_confidence`, default 0.95). `best_single` is an out-of-sample selector: for each held-out paper it uses the method that did best on the papers before it, so its score is not inflated by picking the winner after seeing every fold. Tuned variants (decay, window, half-life, Bayesian recency discount) keep their default unless another variant is ahead on earlier folds beyond a one-sided 95% t-bound. |
@@ -209,7 +209,8 @@ questions × topics ──► alignment scores (semantic similarity, by default 
                        only questions from earlier papers)
                    ──► status A clearly in / B probably in / C uncertain / D outside
                    ──► (A and validated B only) incidence panel Y[t, k] with one row per exam,
-                       marks, types, semantic soft evidence (question level)
+                       marks, types, semantic soft evidence (spread from each question,
+                       capped at 1 per paper and topic: 1 - prod(1 - share))
 
 panel ──► features at each cutoff t (frequency, recency, gaps, hazard, Bayesian posterior,
           semantic, marks, types, co-occurrence, syllabus weight, repeat behaviour, data quality)
@@ -410,10 +411,13 @@ screen let you compare both on your own course.
 *Revised in the low-data upgrade:* TF-IDF stays inside the default, because the bundled
 pretrained model does not beat it for alignment. On the demo course WordLlama alone put 118
 of 140 questions on the right topic and marked only 1 of 4 old-syllabus questions as
-outside (measured before the feedback pass became causal). The hybrid keeps TF-IDF's
-separation (131 of 140 with causal feedback, all 4 old-syllabus questions outside) and adds
-general language knowledge for semantic evidence, similarity between topics, and checks on
-generated questions. See [Low-data inference](LOW_DATA_INFERENCE.md#alignment-backends).
+outside (an offline check made before the feedback pass became causal). With causal
+feedback, TF-IDF alone and the hybrid both put 131 of 140 on the right topic and mark all 4
+old-syllabus questions outside (statuses A 102 / B 29 / C 9 / D 4 for TF-IDF, A 104 / B 30 /
+C 6 / D 4 for the hybrid). So on the demo the hybrid is not shown to map more questions
+correctly than TF-IDF; it leaves fewer questions at status C (6 against 9). The hybrid keeps
+TF-IDF's separation and adds general language knowledge for semantic evidence, similarity
+between topics, and checks on generated questions. See [Low-data inference](LOW_DATA_INFERENCE.md#alignment-backends).
 
 Fitting the alignment TF-IDF on the **syllabus only** keeps exam text out of the
 representation, which removes a subtle leakage path (document frequencies computed from
@@ -421,9 +425,14 @@ future exams). The pretrained model fits nothing on exam text either. The alignm
 feedback pass, which moves topic vectors toward confidently mapped questions, is causal:
 when it aligns a paper it uses only questions from earlier papers (by exam order), so a
 later paper's wording cannot change how an earlier paper is mapped. Before this fix the
-held-out paper's own wording fed its alignment, and the demo's backtest scores against
-mapped labels were optimistic by about 0.035 (each fell by 0.02 to 0.05 once feedback became
-causal; status counts moved from A 109 / B 27 / C 4 / D 4 to A 104 / B 30 / C 6 / D 4).
+held-out paper's own wording fed its alignment, so most of the demo's backtest scores against
+mapped labels were optimistic. Measured in isolation (current code with only the feedback
+pass switched back to all papers), causal feedback changed NDCG against mapped labels by
+-0.072 (co-occurrence) to +0.016 (coverage): ensemble -0.023, frequency -0.031, semantic
+-0.033, while coverage, logistic (+0.002) and random forest (+0.003) went up. Status counts
+moved from A 109 / B 27 / C 4 / D 4 to A 104 / B 30 / C 6 / D 4. The larger drop in the
+regression snapshot (ensemble 0.754 to 0.717) also includes other review fixes (causal K,
+capped semantic evidence, gate changes), so it is not due to causal feedback alone.
 
 ---
 
@@ -483,8 +492,8 @@ main rule (see D4).
    differences (`ensemble.replace_confidence`, default 0.95). `best_single` uses, for each
    held-out paper, the method that did best on the papers before it, so its scores are out of
    sample; picking the winner after seeing every fold would favour whichever method got lucky.
-   If it does replace the ensemble, the report says so. With no fold, the ensemble runs on its
-   reliability priors alone.
+   If it does replace the ensemble, the report says so. With no fold, no skill is measured, so
+   the ensemble weights come from input quality, reliability priors and the per-topic gate.
 7. **Reported baselines.** Random (exact expectation), most frequent, most recent,
    recency-weighted, and the final choice, always side by side. The validation summary adds
    paired differences against random, frequency, recency-frequency and Bayesian recurrence,

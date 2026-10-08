@@ -41,10 +41,10 @@ and no other threshold replaced it.
 * The backtest is rolling-origin over every fold: with T papers, papers 2..T are each predicted from the papers
   before them (T - 1 folds). One paper gives no fold, which is a fact about the data, not a setting.
 * Every component runs on every fold. A component reports "unavailable" only when an input it needs does not
-  exist. Examples: co-occurrence before two consecutive papers exist, syllabus coverage when the syllabus has a
-  single unit and no hours, marks or sub-topics, question-type fit when past papers use one format and the
-  syllabus has no format tags, and the general component when no general model exists (simulated prior
-  switched off and no other real course in the library).
+  exist. Examples: semantic evidence before any paper exists, co-occurrence before two consecutive papers exist,
+  syllabus coverage when the syllabus has a single unit and no hours, marks or sub-topics, question-type fit
+  when past papers use one format and the syllabus has no format tags, and the general component when no
+  general model exists (simulated prior switched off and no other real course in the library).
 * Old `settings.json` files and course overrides that still contain `models.sufficiency`,
   `calibration.min_rows` or `calibration.min_positives` load normally; those keys are ignored (section 12 lists
   every ignored key).
@@ -181,8 +181,10 @@ report:
 and 12 papers, measured on an earlier build of the engine, tau = 4 changed the ensemble's mean NDCG by at most
 0.007 in either direction, so the less aggressive value was kept. Weights for paper t use only folds
 before t, and those folds are scored with the K known at the time (median topics per paper over that fold's
-paper and the papers before it). With no folds, weights are the reliability priors: the general model (df 0)
-and syllabus or pretrained components dominate, and Bayesian recurrence follows. As papers accumulate, course-learned components
+paper and the papers before it). With no folds, no skill is measured, so weights come from input quality, the
+reliability priors and the per-topic gate: the general model (df 0)
+and syllabus or pretrained components dominate, and the one-parameter components (Bayesian recurrence,
+recency-frequency, question-type fit) come next. As papers accumulate, course-learned components
 gain reliability and must earn weight by skill. A component is skipped only when an input it needs does not
 exist (UNAVAILABLE); the ensemble then reweights the others.
 
@@ -331,9 +333,13 @@ over 11 papers:
 differences, ensemble minus baseline: random +0.261 ± 0.024 (better on 11 papers, worse on 0), frequency
 +0.039 ± 0.019 (9 better, 2 worse), recency-frequency +0.051 ± 0.019 (8 better, 2 worse), Bayesian recurrence
 +0.043 ± 0.020 (7 better, 4 worse). Final-model check: ensemble 0.717 against `best_single` 0.707, difference
-+0.010 ± 0.018, so the ensemble was kept. These scores are 0.02-0.05 lower than those measured before alignment
-feedback became causal: the held-out paper's own wording used to feed the alignment, which made the earlier
-figures optimistic by about 0.035.
++0.010 ± 0.018, so the ensemble was kept. Before alignment feedback became causal, the held-out paper's own
+wording fed the alignment, and most app-label scores were optimistic. Measured in isolation (current code with
+only the feedback pass switched back to all papers), making the feedback causal changed the scores by -0.072
+(co-occurrence) to +0.016 (coverage): ensemble -0.023, frequency -0.031, semantic evidence -0.033, while
+coverage, course logistic (+0.002) and random forest (+0.003) went up. The larger drop in the regression
+snapshot (ensemble 0.754 to 0.717) also includes other review fixes (causal K, capped semantic evidence, gate
+changes), so causal feedback accounts for only part of it.
 
 Scored against the generator's planted true topics, the measure the app cannot see for a real course (label
 agreement 92.3%), the picture is different. Ensemble 0.738 ± 0.025, frequency 0.734 ± 0.020, window 0.745,
@@ -381,18 +387,22 @@ Other demo measurements:
 
 ### Alignment backends
 
-| Backend | Demo questions on the right topic | Reworded questions (26) | Old-syllabus questions marked outside |
+| Backend | Demo questions on the right topic | Reworded questions aligned to the right topic (of 26; offline check before causal feedback) | Old-syllabus questions marked outside |
 |---|---:|---:|---:|
-| TF-IDF | 128/140 (app) | 10 | 4/4 |
+| TF-IDF | 131/140 (app, causal feedback) | 10 | 4/4 |
 | Hybrid (default) | 131/140 (app, causal feedback) | 11 | 4/4 |
-| WordLlama alone | 118/140 (offline check) | 10 | 1/4 |
+| WordLlama alone | 118/140 (offline check before causal feedback) | 10 | 1/4 |
 
-The TF-IDF figure was measured before alignment feedback became causal, so it is not directly comparable with the
-hybrid row. The bundled static embeddings do not beat syllabus-fitted TF-IDF for alignment, and alone they
-separate in-syllabus from out-of-syllabus questions poorly. The hybrid keeps TF-IDF's separation and adds
-pretrained knowledge. For detecting reworded repeats, character n-grams found the right topic for 14 of 26
-reworded questions and WordLlama for 11. Repeat detection therefore keeps character n-grams unless a larger
-sentence-transformer is installed (`predictor models download`).
+Status counts on the demo with causal feedback: TF-IDF A 102 / B 29 / C 9 / D 4, hybrid A 104 / B 30 / C 6 / D 4.
+On the demo the hybrid is not shown to map more questions correctly than TF-IDF (131 of 140 each); it leaves
+fewer questions at status C (6 against 9). The bundled static embeddings do not beat syllabus-fitted TF-IDF for
+alignment, and alone they separate in-syllabus from out-of-syllabus questions poorly (1 of 4 old-syllabus
+questions marked outside). The hybrid keeps TF-IDF's separation.
+
+Repeat detection is a different measurement from the reworded-questions column above: for each of the 26
+reworded questions, it checks whether the nearest past question in the demo bank is on the same topic. That was
+true for 14 of 26 with character n-grams and 11 of 26 with WordLlama. Repeat detection therefore keeps character
+n-grams unless a larger sentence-transformer is installed (`predictor models download`).
 
 ## 9. Global and course knowledge in the database
 
@@ -424,7 +434,7 @@ migration test.
 | 1 | No held-out fold. Bayesian recurrence (mostly prior), semantic, general and syllabus components; no calibration |
 | 2-5 | 1-4 folds. Weights mostly from reliability priors; course-learned models run with 1-5% weight (LIMITED); rank intervals wide; scores shown as relative unless calibration is validated |
 | 6-15 | Skill on earlier papers starts to separate components; components that rank worse than average become DOWNWEIGHTED; calibration validated when its Brier gain clears the one-sided 95% bound |
-| 15+ | Course-learned models reach reliability 0.4-0.6 and can earn substantial weight; on a demo-like course the message wording changes to "Advanced inference" at about 25 papers (wording only) |
+| 15+ | The course logistic (about 22.5 parameters) reaches reliability about 0.4 at 15 papers and 0.5 at about 25; gradient boosting and random forest (about 40 each) stay below 0.4 until at least 27 papers. Their weight still depends on measured skill (logistic about 11% at 20 papers on the planted simulations). On a demo-like course the message wording changes to "Advanced inference" at about 25 papers (wording only) |
 
 ## 11. Limitations
 
@@ -443,8 +453,9 @@ migration test.
   Review; it then enters the panel at its order index, counts as half a paper in the components' reliability
   priors, and the evidence profile reports it under `exams_without_year`.
 * The bundled pretrained model is a static word-embedding model. It knows general English but not technical
-  paraphrase well (11 of 26 reworded questions), so repeat detection keeps character n-grams. A
-  sentence-transformer improves this and must be downloaded once.
+  paraphrase well: for 26 reworded questions, its nearest past question was on the same topic for 11, against 14
+  for character n-grams, so repeat detection keeps character n-grams. A full sentence-transformer replaces them
+  for repeat detection; it must be downloaded once, and this document has no measurement of it.
 * Rank intervals hold classifier components fixed during the leave-one-paper-out step.
 * Some components add noise on some courses (question-type fit and coverage on the demo). The ensemble
   downweights them but does not drop them.
@@ -471,7 +482,8 @@ migration test.
 | `calibration.band_low` / `band_high` | 0.10 / 0.90 | percentiles of bootstrap calibrators for the probability band |
 
 Old settings files that contain `models.sufficiency`, `calibration.min_rows`, `calibration.min_positives`,
-`models.selection_rule`, `models.logistic_C` or `models.ensemble_max_members` load normally; those keys are
-ignored, as is the key of the old ensemble replacement rule, which `ensemble.replace_confidence` replaced.
+`ensemble.replace_if_worse_by_se`, `models.selection_rule`, `models.logistic_C` or
+`models.ensemble_max_members` load normally; those keys are ignored. `ensemble.replace_if_worse_by_se` held the
+old one-standard-error replacement rule, which `ensemble.replace_confidence` replaced.
 
-Rebuild the shipped general model with `python -m predictor.inference.generic` (deterministic, about 15 seconds).
+Rebuild the shipped general model with `python -m predictor.inference.generic` (deterministic, about 12 seconds; it reproduces the shipped file exactly).
