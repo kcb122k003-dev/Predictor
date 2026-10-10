@@ -128,3 +128,23 @@ def test_priority_reason_never_calls_a_missing_topic_unlikely():
     assert "numerical problem" not in text and "format" not in text
     assert "no past papers" in priority_reason(category="Low Priority", rank=1, topics=3, stats={"usable_papers": 0},
                                                facts={}, guide=None)
+
+
+def test_placeholders_never_borrow_another_values_name_or_an_incompatible_unit():
+    plate = ("A circular plate of 2.4 m diameter is immersed in water with its greatest and least depths below the free "
+             "surface being 3 m and 1 m. Find the total pressure on one face.")
+    assert numeric_template(plate)[0].endswith("being [depth in m] and [second depth in m]. Find the total pressure "
+                                               "on one face.")
+    assert "carrying water at [velocity in m/s]" in numeric_template(NUMERICAL)[0]
+    oil = "Oil of viscosity 0.1 Pa.s flows through a 10 cm diameter pipe at 2 litres/s. Calculate the pressure drop."
+    assert numeric_template(oil)[0].startswith(
+        "Oil of viscosity [viscosity in Pa.s] flows through a [diameter in cm] pipe at [flow rate in litres/s].")
+    assert "[diameter in cm] strikes" in numeric_template("A jet of water 5 cm in diameter strikes a plate at 20 m/s.")[0]
+
+
+def test_short_note_items_are_short_notes_even_when_their_name_contains_a_format_word():
+    assert format_labels("Moody diagram", ["diagram", "short_answer"], context="Write short notes on (any two):") \
+        == ["short_answer"]
+    assert families_of(format_labels("Moody diagram", ["diagram"], context="Write short notes on:")) == ["short_note"]
+    # A real instruction inside a short-notes question keeps its format.
+    assert "diagram" in format_labels("Draw the Moody diagram and explain it", ["diagram"], context="Short notes:")

@@ -63,14 +63,13 @@ from ..temporal.panel import FORMATS, ExamInfo, Panel, QuestionRecord, build_pan
 from ..topic_modeling.families import FamilyQuestion, find_recurrence
 from ..utils.logging import get_logger, log_event
 from ..visualization.charts import build_charts
+from .fingerprint import ENGINE_VERSION, data_fingerprint
 from .fingerprint import combined as combine_fingerprint
-from .fingerprint import data_fingerprint
 from .context import AppContext
 from .syllabus_store import current_version, to_tree, topics_of
 
 log = get_logger("analysis")
 RANK_WEIGHTS = {1: 1.0, 2: 0.5, 3: 0.33}
-ENGINE_VERSION = "2.0"
 # Exams with these sources never enter an analysis (nothing creates them; this is a guard).
 NON_HISTORICAL_SOURCES = ("generated", "simulated")
 KIND_FORMATS = {"numerical": "numerical", "derivation": "derivation", "theory": "theory", "definition": "definition",

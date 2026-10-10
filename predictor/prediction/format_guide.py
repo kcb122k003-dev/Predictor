@@ -178,31 +178,41 @@ def numeric_template(text: str) -> tuple[str, list[dict[str, str]]]:
     """The question with every numerical value replaced by a named placeholder, e.g.
     "a pipe of 300 mm diameter" -> "a pipe of [diameter in mm]". Returns (template, placeholders)."""
     t = clean_question(text)
-    out, pos, placeholders = [], 0, []
-    named: list[tuple[str, str]] = []  # (unit, name) of values named by a quantity word in the question
+    out, pos, placeholders, prev_end = [], 0, [], 0
+    named: list[tuple[str, str, int]] = []  # (unit, name, end position) of values named by a quantity word
     for m in NUMBER_UNIT.finditer(t):
         value, unit = m.group(1), m.group(2)
         start, end = m.span()
         after = t[end:]
+        dim = _dimension(unit) if unit else None
         name, consumed = _name_after(after) if unit else (None, 0)
+        if name and not _fits(name, dim):
+            name, consumed = None, 0
         if not name:
-            name = _name_before(t[:start])
+            # Look back only as far as the previous value, so one value never takes another value's name.
+            name = _name_before(t[prev_end:start])
+            if name and not _fits(name, dim):
+                name = None
         if not name and unit:
             # "A pipe of 15 cm diameter suddenly enlarges to 30 cm": a later value in the same unit with no word of
             # its own is the next value of the same quantity ("second diameter"), not a generic length.
-            same = [n for u, n in named if u.lower() == unit.lower()]
+            # Only for a value that follows closely ("enlarges to 30 cm", "500 mm, 400 mm and 300 mm"); far apart, the
+            # second value is usually a different quantity.
+            same = [n for u, n, e in named if u.lower() == unit.lower()
+                    and len(re.findall(r"[A-Za-z]+", t[e:start])) <= 5]
             if same:
                 base = same[-1].split(" ", 1)[1] if same[-1].split(" ", 1)[0] in ORDINALS else same[-1]
                 count = sum(1 for n in same if n == base or n.endswith(f" {base}"))
                 name = f"{ORDINALS[min(count, len(ORDINALS)) - 1]} {base}"
         if name and unit:
-            named.append((unit, name))
+            named.append((unit, name, end + consumed))
         if not name:
             name = _dimension(unit) if unit else "value"
         label = f"[{name} in {unit}]" if unit else f"[{name}]"
         out.append(t[pos:start])
         out.append(label)
         pos = end + consumed
+        prev_end = pos
         placeholders.append({"name": name, "unit": unit or "", "example": value})
     out.append(t[pos:])
     template = re.sub(r"\s+", " ", "".join(out)).strip()
@@ -212,8 +222,29 @@ def numeric_template(text: str) -> tuple[str, list[dict[str, str]]]:
 ORDINALS = ["second", "third", "fourth", "fifth"]
 
 
+# Quantity words whose physical dimension is known, so a word never names a value in an incompatible unit
+# ("diameter" for a value in litres/s).
+NOUN_DIMENSION = {
+    **{n: "length" for n in ("diameter", "length", "width", "breadth", "depth", "height", "thickness", "radius",
+                             "distance", "span", "spacing", "elevation", "level", "displacement", "deflection", "size")},
+    "velocity": "velocity", "speed": "velocity", "pressure": "pressure", "temperature": "temperature",
+    "discharge": "flow rate", "flow": "flow rate", "area": "area", "volume": "volume", "mass": "mass",
+    "weight": "force", "force": "force", "load": "force", "power": "power", "energy": "energy", "work": "energy",
+    "heat": "energy", "time": "time", "duration": "time", "density": "density", "viscosity": "viscosity",
+    "acceleration": "acceleration", "angle": "angle", "voltage": "voltage", "current": "current",
+    "resistance": "resistance",
+}
+
+
+def _fits(name: str, dim: str | None) -> bool:
+    """Whether a quantity word can name a value with this unit dimension (unknown either way: accepted)."""
+    word = name.split()[-1]
+    known = NOUN_DIMENSION.get(word)
+    return not dim or dim == "value" or known is None or known == dim or (word == "head" and dim == "length")
+
+
 def _name_after(after: str) -> tuple[str | None, int]:
-    m = re.match(r"\s+([a-z]+)(\s+(?:factor|coefficient|gradient|ratio))?\b", after, flags=re.I)
+    m = re.match(r"\s+(?:in\s+)?([a-z]+)(\s+(?:factor|coefficient|gradient|ratio))?\b", after, flags=re.I)
     if m and m.group(1).lower() in QUANTITY_NOUNS:
         name = m.group(1).lower() + (m.group(2) or "").lower()
         return name.strip(), m.end()
@@ -221,7 +252,8 @@ def _name_after(after: str) -> tuple[str | None, int]:
 
 
 def _name_before(before: str) -> str | None:
-    words = re.findall(r"[A-Za-z]+|=|:", before)[-8:]
+    words = re.findall(r"[A-Za-z]+|=|:", before)[-12:]
+    plain = 0  # ordinary words passed on the way back ("depths below the free surface being 3 m")
     for i in range(len(words) - 1, -1, -1):
         w = words[i].lower()
         # "with diameters 500 mm, 400 mm and 300 mm": skip the units of the earlier values in the same list.
@@ -235,7 +267,9 @@ def _name_before(before: str) -> str | None:
                     "factor", "coefficient", "gradient", "ratio", "gravity", "head", "rate", "load", "loss"):
                 return f"{prev} {w}"
             return w
-        break
+        plain += 1
+        if plain > 5 or w in ("=", ":"):
+            break
     return None
 
 
@@ -426,12 +460,17 @@ def _representative(questions: list[dict[str, Any]], ctx: "_Ctx | None" = None) 
     Numerical questions are shown with their real values, so they must also pass the topic check (``accept``); a
     past question that does not is probably mapped to the wrong topic and is skipped.
     """
-    ordered = sorted(questions, key=lambda q: (q.get("role") != "primary", -q["exam_index"], q["id"]))
+    ordered = sorted(questions, key=lambda q: (q.get("role") != "primary", not _certain(q), -q["exam_index"], q["id"]))
     for q in ordered:
         accept = ctx.accept if ctx else None
         if accept is None or not (set(q.get("families", [])) & {"numerical", "design"}) or accept(q):
             return q
     return None
+
+
+def _certain(q: dict[str, Any]) -> bool:
+    """A mapping you set, or a clear (status A) automatic match; status B is only a probable match."""
+    return bool(q.get("manual")) or q.get("status", "A") == "A"
 
 
 def _source(q: dict[str, Any]) -> dict[str, Any]:
@@ -472,6 +511,10 @@ def _numerical_parts(rep: dict[str, Any], family: str) -> tuple[dict[str, Any] |
                  f"with other values. The app does not invent new values because it cannot check that they give a "
                  f"solvable problem."),
     }
+    if not _certain(rep):
+        illustrative["probable_match"] = True
+        illustrative["note"] += (" Its link to this topic is only a probable match; check it under Past questions and "
+                                 "correct the mapping if it belongs elsewhere.")
     return tpl, illustrative
 
 

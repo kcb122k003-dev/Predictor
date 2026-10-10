@@ -288,23 +288,45 @@ class ReviewService:
             q = s.get(ExamQuestion, qid)
             if q is None:
                 raise KeyError(qid)
+            # Keep the automatic mapping this correction replaces, so "Use automatic mapping" can restore it without
+            # waiting for the next analysis.
+            replaced = [_auto_snapshot(m) for m in q.mappings if m.method == "auto"]
+            for m in q.mappings:
+                if m.method == "manual":
+                    replaced = replaced or list((m.evidence or {}).get("replaced_automatic") or [])
             s.execute(delete(QuestionTopicMapping).where(QuestionTopicMapping.question_id == qid))
             if status == "D" and not topic_ids:
                 s.add(QuestionTopicMapping(question_id=qid, topic_id=None, rank=1, confidence=1.0, status="D",
-                                           method="manual", evidence={"reason": "Marked outside the syllabus by you."}))
+                                           method="manual", evidence={"reason": "Marked outside the syllabus by you.",
+                                                                      "replaced_automatic": replaced}))
             for rank, tid in enumerate(topic_ids, start=1):
                 if s.get(CourseTopic, tid) is None:
                     raise ValueError(f"Topic {tid} does not exist.")
+                evidence = {"reason": "Set by you."}
+                if rank == 1:
+                    evidence["replaced_automatic"] = replaced
                 s.add(QuestionTopicMapping(question_id=qid, topic_id=tid, rank=rank, confidence=1.0, status=status,
-                                           method="manual", evidence={"reason": "Set by you."}))
+                                           method="manual", evidence=evidence))
             s.flush()
             s.refresh(q)
             return {"question_id": qid, "mappings": [mapping_dict(m) for m in q.mappings]}
 
     def clear_manual_mapping(self, qid: int) -> None:
+        """Remove your correction and put back the automatic mapping it replaced (if one was kept)."""
         with self.app.db.session() as s:
+            manual = s.execute(select(QuestionTopicMapping).where(QuestionTopicMapping.question_id == qid,
+                                                                  QuestionTopicMapping.method == "manual")).scalars().all()
+            restore = next((list((m.evidence or {}).get("replaced_automatic") or []) for m in manual
+                            if (m.evidence or {}).get("replaced_automatic")), [])
             s.execute(delete(QuestionTopicMapping).where(QuestionTopicMapping.question_id == qid,
                                                          QuestionTopicMapping.method == "manual"))
+            has_auto = s.execute(select(QuestionTopicMapping.id).where(QuestionTopicMapping.question_id == qid,
+                                                                       QuestionTopicMapping.method == "auto")).first()
+            if not has_auto:
+                for row in restore:
+                    if row.get("topic_id") is not None and s.get(CourseTopic, row["topic_id"]) is None:
+                        continue  # the topic was deleted since; the next analysis maps the question again
+                    s.add(QuestionTopicMapping(question_id=qid, method="auto", **row))
 
     # ----------------------------------------------------------------- topics
     def syllabus(self, course_id: int) -> dict[str, Any]:
@@ -392,3 +414,11 @@ class ReviewService:
             course_id = t.course_id
             s.delete(t)
         self.ingest.reindex(course_id)
+
+
+AUTO_FIELDS = ("topic_id", "rank", "confidence", "status", "semantic_similarity", "keyword_overlap",
+               "unknown_term_ratio", "matched_terms", "evidence_text", "evidence")
+
+
+def _auto_snapshot(m: QuestionTopicMapping) -> dict[str, Any]:
+    return {k: getattr(m, k) for k in AUTO_FIELDS}

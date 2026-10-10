@@ -309,3 +309,21 @@ def test_course_with_only_a_syllabus(tmp_path, demo_files):
     guide = d["prediction"]["format_guide"]
     assert guide["evidence"] == "inferred" and guide["papers"] == 0
     assert "no past papers" in d["prediction"]["priority_reason"]
+
+
+def test_undoing_a_correction_restores_the_automatic_mapping(editable):
+    c, cid, _ = editable
+    rows = c.get(f"/api/courses/{cid}/mappings", params={"status": "A"}).json()
+    row = next(r for r in rows if all(m["method"] == "auto" for m in r["mappings"]))
+    qid = row["question"]["id"]
+    auto = [(m["topic_id"], m["rank"]) for m in row["mappings"]]
+    other = next(n["id"] for n in c.get(f"/api/courses/{cid}/explorer").json()["nodes"]
+                 if n["level"] == "topic" and n["id"] not in {t for t, _ in auto})
+    c.put(f"/api/questions/{qid}/mapping", json={"topic_ids": [other], "status": "A"})
+    c.put(f"/api/questions/{qid}/mapping", json={"topic_ids": [], "status": "D"})  # a second correction
+    assert c.get(f"/api/courses/{cid}/freshness").json()["stale"]
+    c.delete(f"/api/questions/{qid}/mapping")
+    after = next(r for r in c.get(f"/api/courses/{cid}/mappings").json() if r["question"]["id"] == qid)
+    assert [(m["topic_id"], m["rank"]) for m in after["mappings"]] == auto
+    assert all(m["method"] == "auto" for m in after["mappings"]) and after["status"] == "A"
+    assert c.get(f"/api/courses/{cid}/freshness").json()["stale"] is False

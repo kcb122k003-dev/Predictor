@@ -172,6 +172,17 @@ export async function renderExplorer(main, course, { sub } = {}) {
   // Filtering ------------------------------------------------------------
   const filtering = () => !!(state.q || state.unit || state.history || state.format || state.priority || state.evidence);
 
+  function descendants(id) {
+    const out = [];
+    const stack = [...((byId.get(id) || {}).children || [])];
+    while (stack.length) {
+      const c = stack.pop();
+      out.push(c);
+      stack.push(...((byId.get(c) || {}).children || []));
+    }
+    return out;
+  }
+
   function ancestors(id) {
     const out = [];
     for (let n = byId.get((byId.get(id) || {}).parent_id); n; n = byId.get(n.parent_id)) out.push(n.id);
@@ -275,7 +286,12 @@ export async function renderExplorer(main, course, { sub } = {}) {
       let visible = null;
       if (matchSet) {
         visible = new Set();
-        for (const id of matchSet) { visible.add(id); for (const a of ancestors(id)) visible.add(a); }
+        for (const id of matchSet) {
+          visible.add(id);
+          for (const a of ancestors(id)) visible.add(a);
+          // A unit found by a text search shows what it contains.
+          if ((byId.get(id) || {}).level === "group") for (const d of descendants(id)) visible.add(d);
+        }
       }
       const ul = h("ul", { class: "ex-root" });
       treeLevel(ov.roots && ov.roots.length ? ov.roots : order.filter(id => !byId.has(byId.get(id).parent_id)), ul, visible, matchSet);
@@ -325,8 +341,11 @@ export async function renderExplorer(main, course, { sub } = {}) {
     const top = Math.max(box.top, 0);
     const bottom = Math.min(box.bottom, window.innerHeight);
     const r = el.getBoundingClientRect();
-    if (bottom - top < 40) return;
+    if (bottom - top < 40) { el.scrollIntoView({ block: "center" }); return; }
     if (r.top < top || r.bottom > bottom) listBox.scrollTop += r.top - top - (bottom - top) / 3;
+    // When the tree box is already scrolled to its end, the row can still be below the window: scroll the page.
+    const after = el.getBoundingClientRect();
+    if (after.bottom > window.innerHeight || after.top < 0) window.scrollBy(0, after.top - window.innerHeight / 3);
   }
 
   // Selection and the main panel ---------------------------------------------

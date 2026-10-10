@@ -21,12 +21,16 @@ from ..database.models import AnalysisRun, CourseTopic, Exam, ExamQuestion, Ques
 from .syllabus_store import current_version
 
 NON_HISTORICAL_SOURCES = ("generated", "simulated")
+# Version of what an analysis stores (counts, format guides, wording). A run made by an older version is reported
+# as out of date even when the data did not change.
+ENGINE_VERSION = "2.1"
 PART_MESSAGES = {
     "papers": "papers were added, removed, included or excluded, or their year changed",
     "questions": "question text, marks, optional flags or types you set were edited",
     "mappings": "topic mappings were corrected",
     "syllabus": "the syllabus changed",
     "settings": "analysis settings changed",
+    "engine": "the app was updated (new counts, format guides or wording)",
 }
 
 
@@ -64,7 +68,23 @@ def data_fingerprint(session, course_id: int, settings) -> dict[str, str]:
             topics.append((t.id, t.parent_id, t.number, t.title, list(t.concepts or []), bool(t.excluded),
                            list(t.kinds or []), t.hours, t.marks_weight, t.order_no))
     return {"papers": _h(papers), "questions": _h(questions), "mappings": _h(sorted(mappings, key=str)),
-            "syllabus": _h(topics), "settings": _h(settings.as_dict())}
+            "syllabus": _h(topics), "settings": _h(analysis_settings(settings))}
+
+
+# Sections that never change an analysis (where files live, logging, the web server, OCR of new uploads).
+NON_ANALYSIS_SECTIONS = {"app", "logging", "server", "ui", "ocr", "ingestion", "quality", "parsing", "search", "export"}
+
+
+def analysis_settings(settings) -> dict[str, Any]:
+    """The settings that can change an analysis's results: no folders or file paths, so moving or restoring the
+    data folder never makes results look out of date."""
+    def clean(obj):
+        if isinstance(obj, dict):
+            return {k: clean(v) for k, v in obj.items()
+                    if not (k.endswith("_dir") or k.endswith("_path") or k in ("data_dir", "model_dir"))}
+        return obj
+
+    return {k: clean(v) for k, v in settings.as_dict().items() if k not in NON_ANALYSIS_SECTIONS}
 
 
 def combined(parts: dict[str, str]) -> str:
@@ -81,7 +101,9 @@ def freshness(session, run: AnalysisRun | None, settings) -> dict[str, Any]:
                 "message": "This analysis was made before change tracking existed; re-run it to be sure the results "
                            "match your current data."}
     current = data_fingerprint(session, run.course_id, settings)
-    changed = [k for k in PART_MESSAGES if stored.get(k) != current.get(k)]
+    changed = [k for k in PART_MESSAGES if k != "engine" and stored.get(k) != current.get(k)]
+    if (run.engine_version or "") != ENGINE_VERSION:
+        changed.append("engine")
     message = ""
     if changed:
         message = ("Since this analysis ran, " + "; ".join(PART_MESSAGES[k] for k in changed)

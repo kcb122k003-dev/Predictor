@@ -113,8 +113,13 @@ def format_labels(text: str, types: list[str] | None, marks: float | None = None
     # "Prove that" / "Show that" are proofs, not derivations from first principles, unless both are asked.
     if "prove" in found and not re.search(r"\b(?:derive|deduce|obtain)\b", body, re.I):
         found.discard("derive")
-    if "short_answer" not in found and re.search(r"\bshort notes?\b", f"{context} {body}", re.I):
+    if re.search(r"\bshort notes?\b", f"{context} {body}", re.I):
         found.add("short_answer")
+        # An item under "Write short notes on ..." is just a name ("Moody diagram", "Hydraulic gradient line"); a
+        # word such as "diagram" in that name is not an instruction to draw one.
+        if len(body.split()) <= 8 and not any(p.search(body) for _, p in VERB_LABELS) and not re.search(
+                r"\b(?:draw|sketch|define|derive|calculate|compare|differentiate|explain|discuss)\b", body, re.I):
+            found = {"short_answer"}
     if not found:
         found.add("unclassified")
     return [label for label in LABELS if label in found]

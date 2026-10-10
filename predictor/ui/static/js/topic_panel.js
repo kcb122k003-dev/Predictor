@@ -25,7 +25,7 @@
 //   renderFormatGuide(g, { alternatives = 2 })  element for prediction.format_guide.
 //   formatEvidenceTag(g)   kind tag for a format guide's evidence (established, weak or inferred).
 //   templateBlock(t)       "General template" block with each [placeholder] marked (format_guide.template).
-//   illustrativeBlock(il)  practice question block (format_guide.illustrative): a generated "Illustrative practice
+//   illustrativeBlock(il, {showMarks})  practice question block (format_guide.illustrative): a generated "Illustrative practice
 //                          question", or a real "Past exam question to practise" (basis past_values).
 //   freshnessBanner(freshness, { courseId, onDone, onStart })  stale-results banner with "Re-analyse now", or
 //                          null. The button runs the analysis itself (then onDone), or calls onStart() instead.
@@ -647,7 +647,7 @@ export function templateBlock(t) {
     t.note ? h("p", { class: "help" }, t.note) : null);
 }
 
-export function illustrativeBlock(il) {
+export function illustrativeBlock(il, { showMarks = true } = {}) {
   const src = il.source;
   if (il.basis === "past_values") {
     // A real past question shown word for word (its values are known to give a solvable problem): it is a
@@ -657,11 +657,13 @@ export function illustrativeBlock(il) {
       h("div", { class: "ex-block-label" }, `Past exam question to practise${where ? ` (${where})` : ""}`, kindTag("fact")),
       h("p", { class: "ex-illustrative-text" }, il.text),
       h("p", { class: "help" }, `This is ${src ? `${src.exam} question ${src.question}` : "a real past question"}, word for word. `,
-        "A new paper will ask a similar question with other values. The app does not invent new values, because it cannot check that they give a solvable problem."));
+        "A new paper will ask a similar question with other values. The app does not invent new values, because it cannot check that they give a solvable problem."),
+      il.probable_match ? h("p", { class: "help" }, kindTag("weak"), " Its link to this topic is only a probable match. Check it under Past questions and correct the mapping if it belongs elsewhere.") : null);
   }
   const known = (v) => v !== null && v !== undefined;
   const range = known(il.marks_low) ? marksRange(il.marks_low, il.marks_high) : "";
-  const marks = !range ? null : il.marks_basis === "topic" ? `Marks in this topic's past questions of this kind: ${range}.`
+  // The guide's own marks note (this topic's questions in this format) takes precedence over the generator's range.
+  const marks = !range || !showMarks ? null : il.marks_basis === "topic" ? `Marks in this topic's past questions of this kind: ${range}.`
     : il.marks_basis === "course" ? `Marks for questions of this kind across the whole course (not specific to this topic): ${range}.`
       : `Typical marks for questions of this kind: ${range}.`;
   return h("div", { class: "ex-illustrative" },
@@ -685,7 +687,7 @@ export function renderFormatGuide(g, { alternatives = 2 } = {}) {
     g.marks_note ? h("p", { class: "help" }, g.marks_note) : null,
     g.reliability && g.reliability.text ? h("p", { class: "help" }, g.reliability.text) : null,
     g.template ? templateBlock(g.template) : null,
-    g.illustrative ? illustrativeBlock(g.illustrative) : g.illustrative_note ? h("p", { class: "help" }, g.illustrative_note) : null,
+    g.illustrative ? illustrativeBlock(g.illustrative, { showMarks: !g.marks_note }) : g.illustrative_note ? h("p", { class: "help" }, g.illustrative_note) : null,
     alts.length ? h("div", { class: "ex-alts" }, h("h4", { style: { margin: "12px 0 4px" } }, "Other formats seen for this item"),
       alts.map(a => h("div", { class: "ex-alt" },
         h("div", {}, h("strong", {}, a.display), a.support ? h("span", { class: "help" }, ` - ${a.support}`) : null),

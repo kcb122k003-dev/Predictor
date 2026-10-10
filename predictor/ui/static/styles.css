@@ -259,7 +259,7 @@ pre.pagetext { white-space: pre-wrap; background: var(--panel); border: 1px soli
 .ex-filterbox summary { cursor: pointer; font-size: .85rem; color: var(--muted); }
 .ex-filter-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; margin-top: 6px; }
 .ex-toolbar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; padding: 6px 10px; border-bottom: 1px solid var(--border); font-size: .8rem; color: var(--muted); }
-.ex-tree { overflow-y: auto; flex: 1 1 auto; min-height: 120px; padding: 6px 4px; overscroll-behavior: contain; }
+.ex-tree { position: relative; overflow-y: auto; flex: 1 1 auto; min-height: 120px; padding: 6px 4px; overscroll-behavior: contain; }
 .ex-tree ul { list-style: none; margin: 0; padding: 0; }
 .ex-tree ul.ex-children { padding-left: 14px; }
 .ex-tree li { margin: 1px 0; }

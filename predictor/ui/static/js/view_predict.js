@@ -261,7 +261,7 @@ export async function renderPredict(main, course, { refreshCourse }) {
       h("summary", {}, h("span", { class: "pr-sum-label" }, "Question format details"),
         first ? h("span", { class: "pr-sum-q" }, kindTag(past ? "fact" : "illustrative"), " ",
           past ? "Past question to practise: " : "Practice example: ", first) : null),
-      il ? illustrativeBlock(il) : g.illustrative_note ? h("p", { class: "help" }, g.illustrative_note) : null,
+      il ? illustrativeBlock(il, { showMarks: !g.marks_note }) : g.illustrative_note ? h("p", { class: "help" }, g.illustrative_note) : null,
       g.template ? templateBlock(g.template) : null,
       g.why ? h("p", {}, h("strong", {}, "Why this format: "), g.why) : null,
       g.marks_note ? h("p", { class: "help" }, g.marks_note) : null,

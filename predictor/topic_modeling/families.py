@@ -105,7 +105,9 @@ def find_recurrence(questions: list[FamilyQuestion], settings: Settings,
             if balance < 0.5:
                 ratio = min(ratio, float(fuzz.token_sort_ratio(norm[i], norm[j])))
             same_topic = qi.topic is not None and qi.topic == qj.topic
-            same_concept = qi.concept is not None and qi.concept == qj.concept
+            # A shared syllabus node is a shared concept only when it is finer than the topic; otherwise every
+            # question on a topic without sub-topics would count as "the same concept".
+            same_concept = qi.concept is not None and qi.concept == qj.concept and qi.concept != qi.topic
             kind = ""
             if sim >= cfg.exact_similarity and ratio >= cfg.exact_string_ratio:
                 kind = "exact"
