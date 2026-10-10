@@ -40,10 +40,11 @@ def data_fingerprint(session, course_id: int, settings) -> dict[str, str]:
                             .order_by(Exam.id)).scalars().all()
     papers = [(e.id, bool(e.include_in_analysis), round(float(e.order_index or 0.0), 4), e.year, e.source,
                (e.structure or {}).get("label"), e.full_marks) for e in exams]
-    included = [e.id for e in exams if e.include_in_analysis]
+    # Questions of every paper (included or not): including or excluding a paper is a "papers" change only.
+    all_ids = [e.id for e in exams]
     questions, mappings = [], []
-    if included:
-        rows = session.execute(select(ExamQuestion).where(ExamQuestion.exam_id.in_(included))
+    if all_ids:
+        rows = session.execute(select(ExamQuestion).where(ExamQuestion.exam_id.in_(all_ids))
                                .order_by(ExamQuestion.exam_id, ExamQuestion.order_no)).scalars().all()
         for q in rows:
             questions.append((q.id, q.exam_id, q.parent_id, bool(q.is_leaf), q.text, q.marks, bool(q.is_optional),
