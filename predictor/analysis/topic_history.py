@@ -107,10 +107,12 @@ def build_history(papers: list[PaperInfo], excluded: list[ExcludedPaper], questi
         "questions": {str(q.id): _question_dict(q) for q in questions},
         "course_families": _course_families(questions),
     }
-    topics = {}
-    for tid in topic_ids:
-        topics[str(tid)] = node_stats(data, lambda n, t=tid: topic_of(n) == t)
-    data["topics"] = topics
+    index = node_index(data)
+    by_topic: dict[int, set[int]] = defaultdict(set)
+    for node, qids in index.items():
+        by_topic[topic_of(node)] |= qids
+    data["topics"] = {str(tid): node_stats(data, lambda n, t=tid: topic_of(n) == t, by_topic.get(tid, set()))
+                      for tid in topic_ids}
     return data
 
 
