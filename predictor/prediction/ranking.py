@@ -357,19 +357,8 @@ def _evidence_lines(panel: Panel, f: dict[str, Any], location: str | None) -> li
     if f.get("major_question_rate") is not None and f["appearances"]:
         lines.append(f"Tested as a major question (10% or more of the paper) in {_fmt_pct(f['major_question_rate'])} "
                      f"of appearances.")
-    counts = f.get("format_counts")
-    if counts:
-        top = max(counts, key=counts.get)
-        line = f"Most common question format: {top} ({counts[top]} of {sum(counts.values())})"
-        if f.get("last_format") and f["last_format"] != top:
-            line += f"; last time it was {f['last_format']}"
-        lines.append(line + ".")
-    tf = f.get("type_forecast")
-    if tf and tf.get("format"):
-        source = {"global": "the course-wide format mix", "topic": "this topic's own recent formats",
-                  "transition": "this topic's recent formats and format transitions"}.get(tf.get("method"), "")
-        lines.append(f"Predicted format if it appears: {tf['format']} ({_fmt_pct(tf['probability'])}"
-                     + (f", from {source}, which forecast formats best in the backtest" if source else "") + ").")
+    # Question formats are described once, by the topic's format guide (prediction/format_guide.py), so the
+    # evidence lines do not repeat or contradict it.
     if f.get("exact_repeats"):
         lines.append(f"{f['exact_repeats']} question(s) on this topic repeated an earlier question almost word for word.")
     if f.get("mapping_confidence") is not None:

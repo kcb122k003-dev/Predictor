@@ -12,6 +12,7 @@ import { renderPaper } from "./view_paper.js";
 import { renderSearch } from "./view_search.js";
 import { renderSettings } from "./view_settings.js";
 import { renderHelp } from "./view_help.js";
+import { renderExplorer, renderExplorerCourses } from "./view_explorer.js";
 
 const TABS = [
   ["files", "1. Upload files"],
@@ -20,6 +21,7 @@ const TABS = [
   ["mapping", "4. Topic mapping"],
   ["predict", "5. Analyze & Predict"],
   null,
+  ["explorer", "Syllabus Explorer"],
   ["analytics", "Analytics"],
   ["models", "Model performance"],
   ["paper", "Predicted papers"],
@@ -27,18 +29,27 @@ const TABS = [
 ];
 const VIEWS = {
   files: renderFiles, review: renderReview, syllabus: renderSyllabus, mapping: renderMapping,
-  predict: renderPredict, analytics: renderAnalytics, models: renderModels, paper: renderPaper, search: renderSearch,
+  predict: renderPredict, explorer: renderExplorer, analytics: renderAnalytics, models: renderModels, paper: renderPaper, search: renderSearch,
 };
 
 let currentCourse = null;
 let renderToken = 0;
+// A view that handles its own sub-route (the 4th hash segment, e.g. #/course/1/explorer/21) returns
+// { update(sub) }; moving between its sub-routes then updates the view in place instead of re-rendering it.
+let activeView = null;
 
 export function navigate(hash) { window.location.hash = hash; }
 
 async function route() {
-  const token = ++renderToken;
   const hash = window.location.hash.replace(/^#/, "") || "/";
   const parts = hash.split("/").filter(Boolean);
+  if (activeView && parts[0] === "course" && activeView.key === `${parts[1]}/${parts[2]}`) {
+    ++renderToken;
+    activeView.update(parts[3]);
+    return;
+  }
+  activeView = null;
+  const token = ++renderToken;
   const main = document.getElementById("main");
   const side = document.getElementById("side");
   const layout = document.getElementById("layout");
@@ -55,7 +66,8 @@ async function route() {
       layout.classList.remove("no-side");
       renderSide(side, id, tab);
       const view = VIEWS[tab] || renderFiles;
-      await view(main, currentCourse, { refreshCourse });
+      const handle = await view(main, currentCourse, { refreshCourse, sub: parts[3] });
+      if (token === renderToken && handle && typeof handle.update === "function") activeView = { key: `${id}/${tab}`, update: handle.update };
     } else {
       currentCourse = null;
       document.getElementById("course-name").textContent = "";
@@ -63,6 +75,7 @@ async function route() {
       clear(side);
       if (parts[0] === "settings") await renderSettings(main);
       else if (parts[0] === "help") await renderHelp(main);
+      else if (parts[0] === "explorer") await renderExplorerCourses(main);
       else await renderCourses(main);
     }
   } catch (err) {

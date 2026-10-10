@@ -105,13 +105,21 @@ export function modal(title, body, { wide = false } = {}) {
   return { close, box };
 }
 
-export function drawer(body) {
+// Side drawer. It closes on Escape, on a backdrop click and when the route (hash) changes, because it lives
+// outside the page's main element.
+export function drawer(body, { wide = false, label = "Details" } = {}) {
   const backdrop = h("div", { class: "drawer-backdrop" });
-  const panel = h("div", { class: "drawer" }, h("button", { class: "close-x small", onclick: () => close() }, "Close"), body);
-  function close() { backdrop.remove(); panel.remove(); document.removeEventListener("keydown", onKey); }
-  function onKey(e) { if (e.key === "Escape") close(); }
+  const panel = h("div", { class: `drawer${wide ? " wide" : ""}`, role: "dialog", "aria-label": label },
+    h("button", { class: "close-x small", onclick: () => close() }, "Close"), body);
+  function close() {
+    backdrop.remove(); panel.remove();
+    document.removeEventListener("keydown", onKey);
+    window.removeEventListener("hashchange", close);
+  }
+  function onKey(e) { if (e.key === "Escape" && !document.querySelector(".modal")) close(); }
   backdrop.addEventListener("click", close);
   document.addEventListener("keydown", onKey);
+  window.addEventListener("hashchange", close);
   document.body.append(backdrop, panel);
   return { close, panel };
 }
@@ -148,7 +156,8 @@ export function plot(el, data, layout = {}, onClick) {
   if (onClick) el.on("plotly_click", onClick);
 }
 
+// "Extremely High Priority" is the label used by runs made before it was renamed to "Very High Priority".
 export const CATEGORY_COLORS = {
-  "Extremely High Priority": "var(--cat-1)", "High Priority": "var(--cat-2)",
+  "Very High Priority": "var(--cat-1)", "Extremely High Priority": "var(--cat-1)", "High Priority": "var(--cat-2)",
   "Moderate Priority": "var(--cat-3)", "Low Priority": "var(--cat-4)", "Excluded": "var(--bad)",
 };

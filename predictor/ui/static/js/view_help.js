@@ -1,4 +1,5 @@
 import { append, h } from "./dom.js";
+import { kindTag } from "./topic_panel.js";
 
 export async function renderHelp(main) {
   const section = (title, ...paras) => h("div", { class: "card" }, h("h3", {}, title), paras.map(p => typeof p === "string" ? h("p", {}, p) : p));
@@ -16,11 +17,24 @@ export async function renderHelp(main) {
       "Nothing is switched off because a course is small. With two or three papers the pretrained, cross-course and Bayesian parts carry most of the weight and every topic shows a wide rank range; course-specific learned models gain weight as papers accumulate and prove themselves. If picking the best single method on earlier papers beat the combined ranking on your later papers by a clear margin (beyond a one-sided 95% bound), that method is used instead and the reason is shown."),
     section("5. Read the results",
       h("ul", { class: "evidence" },
-        h("li", {}, "Priority categories group topics by evidence strength. Extremely High needs several independent signals agreeing."),
+        h("li", {}, "Priority categories group topics by evidence strength. Very High needs several independent signals agreeing."),
         h("li", {}, "Percentages are shown as probabilities only when calibration was validated on held-out papers. Otherwise they are relative scores."),
         h("li", {}, "Each topic shows a rank range (how far it could move with the available papers) and its evidence strength (how much of its estimate comes from its own history rather than the prior)."),
-        h("li", {}, "Click a topic for its evidence, the past questions behind it, each component's contribution, the Bayesian estimate with its credible interval, the most similar past questions and predicted question formulations."),
-        h("li", {}, "Predicted question formulations reuse your course's own wording and syllabus phrases. Numerical questions are past numericals shown as patterns; the app never invents numbers."))),
+        h("li", {}, "Each topic card shows the topic, its priority, its likelihood, its historical support and a general question format. Open Question format details for an illustrative practice question, the general template, why that format was chosen and alternative formats."),
+        h("li", {}, "Select a topic to open the same panel as the Syllabus Explorer: its history in the past papers, every past question in its original wording, the formats it was asked in, how the model ranked it (component contributions, the Bayesian estimate with its credible interval, the most similar past questions) and where it is in the syllabus."),
+        h("li", {}, "Illustrative practice questions reuse your course's own wording and syllabus phrases. Numerical questions reuse the values of a real past question; the app never invents numbers."))),
+    section("Syllabus Explorer",
+      "Open Syllabus Explorer from the top bar or from a course's sidebar. The left side shows the course contents as a tree. Search it, filter it by unit, history, format, priority or evidence, or sort it by historical frequency, likelihood or last appearance. Select any unit or topic to see how often it appeared in your past papers, every past question on it in its original wording (with View original to see the page), the formats it was asked in, a suggested question format and where it sits in the syllabus.",
+      "Each value carries a tag that tells you what kind of value it is:",
+      h("dl", { class: "facts" },
+        h("dt", {}, kindTag("fact")), h("dd", {}, "Counted directly from the past papers you supplied, such as how many papers asked about a topic."),
+        h("dt", {}, kindTag("estimate")), h("dd", {}, "Estimated by a statistical model, with a range: a calibrated probability or a Bayesian rate. Each topic is estimated separately, so the probabilities do not add up to 100%."),
+        h("dt", {}, kindTag("model")), h("dd", {}, "The topic's position among this course's topics (rank, priority, relative score). It is not a probability."),
+        h("dt", {}, kindTag("illustrative")), h("dd", {}, "A generated practice question. It shows the general form of a question, not the real exam wording."),
+        h("dt", {}, kindTag("inferred")), h("dd", {}, "Not observed in your papers or documents: a format or a name the app inferred from the syllabus or from course patterns."),
+        h("dt", {}, kindTag("weak")), h("dd", {}, "Observed, but too few times to establish a pattern.")),
+      "A topic with no past questions is shown as \"no past questions\". That does not mean it will not be examined.",
+      "If you correct a mapping, or change papers, the syllabus or settings after an analysis, a banner says the results are out of date. Press Re-analyse now to update the counts and predictions."),
     section("Privacy", "Everything runs on this computer. The server listens only on 127.0.0.1. No telemetry and no cloud processing. The bundled pretrained model ships with the app; downloading an optional larger model is a separate command you run yourself."),
   );
 }

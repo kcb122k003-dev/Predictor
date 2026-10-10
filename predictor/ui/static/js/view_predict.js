@@ -1,12 +1,23 @@
 import { api } from "./api.js";
-import { CATEGORY_COLORS, append, badge, clear, componentBadge, drawer, h, num, pct, shareBar, statusBadge, table, toast } from "./dom.js";
+import { CATEGORY_COLORS, append, badge, clear, componentBadge, drawer, h, num, pct, table, toast } from "./dom.js";
+import {
+  SEPARATE_NOTE, formatEvidenceTag, freshnessBanner, illustrativeBlock, kindTag, priorityColor, priorityWord, rankRangeText,
+  renderNodePanel, templateBlock,
+} from "./topic_panel.js";
 
-const CATEGORIES = ["Extremely High Priority", "High Priority", "Moderate Priority", "Low Priority"];
+// Group headings. Runs made before the rename say "Extremely High Priority"; they are listed under Very High.
+const CATEGORIES = ["Very High Priority", "High Priority", "Moderate Priority", "Low Priority"];
+const OLD_CATEGORIES = { "Extremely High Priority": "Very High Priority" };
+const plural = (n, word, many = `${word}s`) => `${n} ${n === 1 ? word : many}`;
+const nodeLabel = (n) => `${n.number || ""} ${n.title || ""}`.trim();
 
 export async function renderPredict(main, course, { refreshCourse }) {
   const head = h("div");
   const body = h("div");
   let timer = null;
+  let nodes = null;           // explorer overview nodes (unit paths, Correct mapping topic list)
+  let nodeById = new Map();
+  let fresh = null;           // holder of the "results out of date" banner
   window.addEventListener("predictor:leave", () => clearTimeout(timer), { once: true });
   append(main, head, body);
 
@@ -43,7 +54,11 @@ export async function renderPredict(main, course, { refreshCourse }) {
   }
 
   async function showResults() {
-    const res = await api.get(`/api/courses/${course.id}/results`);
+    // The explorer overview gives each topic's unit path and the topic list for Correct mapping in the drawer.
+    const [res, ov] = await Promise.all([
+      api.get(`/api/courses/${course.id}/results`),
+      api.get(`/api/courses/${course.id}/explorer`).catch(() => null),
+    ]);
     clear(body);
     if (!res.run) {
       append(body, h("div", { class: "card" },
@@ -55,10 +70,14 @@ export async function renderPredict(main, course, { refreshCourse }) {
           "from the papers before it). It works with any number of papers; fewer papers show up as wider uncertainty.")));
       return;
     }
+    nodes = ov ? ov.nodes : null;
+    nodeById = new Map((nodes || []).map(n => [n.id, n]));
     const run = res.run;
     const s = run.summary;
     const preds = res.predictions;
-    append(body, h("div", { class: "banner warn" }, s.disclaimer));
+    fresh = h("div");
+    append(fresh, freshnessBanner(res.freshness, { courseId: course.id, onStart: start }));
+    append(body, fresh, h("div", { class: "banner warn" }, s.disclaimer));
     if (res.evidence) {
       for (const note of s.notes || []) append(body, h("div", { class: "banner warn" }, note));
       append(body, inferenceStatus(res.evidence));
@@ -80,15 +99,16 @@ export async function renderPredict(main, course, { refreshCourse }) {
         h("a", { class: "btn small", href: `/api/runs/${run.id}/export?format=csv&table=questions` }, "CSV predicted questions"),
         h("a", { class: "btn small", href: `/api/runs/${run.id}/export?format=json` }, "JSON"),
         h("span", { class: "spacer" }), h("span", { class: "help" }, `Analysed in ${s.seconds}s with ${s.embedding_backend}`))));
-    append(body, h("p", { class: "help" }, "Topic predictions are the main output. Exact wording is much harder to predict, so ",
-      "predicted question formulations (inside each topic) are examples of likely forms, not the actual questions."));
+    append(body, h("p", { class: "help" }, "Topic predictions are the main output. Exact wording is much harder to predict, so an ",
+      "illustrative practice question shows the general form a question could take, not the actual exam question. ",
+      "Select a topic to see its full history, past questions and syllabus source."));
 
     for (const cat of CATEGORIES) {
-      const items = preds.filter(p => p.category === cat);
+      const items = preds.filter(p => (OLD_CATEGORIES[p.category] || p.category) === cat);
       if (!items.length) continue;
       const section = h("div", { class: "category" },
         h("h3", {}, h("span", { class: "dot", style: { background: CATEGORY_COLORS[cat] } }), cat, h("span", { class: "muted" }, `(${items.length})`)));
-      for (const p of items) section.appendChild(card(p, run.id, s.calibrated));
+      for (const p of items) section.appendChild(card(p, s.calibrated));
       body.appendChild(section);
     }
     const excluded = (res.excluded && res.excluded.groups) || [];
@@ -129,132 +149,140 @@ export async function renderPredict(main, course, { refreshCourse }) {
     return h("div", { class: "stat" }, h("div", { class: "v" }, String(v ?? "")), h("div", { class: "l" }, label));
   }
 
-  function card(p, runId, calibrated) {
-    const f = p.facts || {};
-    const tf = f.type_forecast || {};
-    const value = calibrated && p.probability !== null
-      ? h("div", {}, h("div", { class: "p" }, pct(p.probability)), h("div", { class: "help" }, `range ${pct(p.prob_low)} to ${pct(p.prob_high)}`))
-      : h("div", {}, h("div", { class: "p" }, num(p.relative_score, 2)), h("div", { class: "help" }, "relative score"));
-    const width = calibrated && p.probability !== null ? p.probability : p.relative_score;
-    const el = h("div", { class: "topic-card" },
-      h("div", { class: "rank" }, String(p.rank)),
-      h("div", {},
-        h("div", { class: "title" }, p.label),
-        h("div", { class: "meta" },
-          h("span", {}, `${f.recent_appearances ?? 0}/${f.recent_window ?? 0} recent papers`),
-          h("span", { title: "Historical coverage: papers with the topic / all papers, and questions behind it" },
-            `${f.appearances ?? 0}/${f.exams ?? 0} papers, ${f.questions_total ?? 0} question${f.questions_total === 1 ? "" : "s"}`),
-          h("span", {}, f.last_label ? `last: ${f.last_label}` : "never asked"),
-          tf.format ? h("span", {}, `likely format: ${tf.format}`) : null,
-          f.marks_mean ? h("span", {}, `marks ${f.marks_min}-${f.marks_max}`) : null,
-          f.mapping_confidence ? h("span", {}, `syllabus match ${pct(f.mapping_confidence)}`) : null,
-          p.uncertainty && p.uncertainty.rank_low ? h("span", { title: "Plausible rank range given the available papers" },
-            `rank range ${p.uncertainty.rank_low}-${p.uncertainty.rank_high}`) : null,
-          p.evidence_strength ? h("span", { title: "How much of the estimate comes from this topic's own history" }, `evidence: ${p.evidence_strength.toLowerCase()}`) : null,
-          badge(`${p.confidence} confidence`, p.confidence === "High" ? "ok" : p.confidence === "Low" ? "warn" : "info")),
-        h("div", { class: "bar" }, h("div", { style: { width: `${Math.round(100 * (width || 0))}%`, background: CATEGORY_COLORS[p.category] } }))),
-      h("div", { class: "prob" }, value));
-    el.addEventListener("click", () => openTopic(runId, p.topic_id, calibrated));
+  // Topic card: fields 1-5 always visible, the format details (6-8) in a <details> block. A click anywhere on the
+  // card opens the topic panel, except on links, buttons and the details block.
+  function card(p, calibrated) {
+    const g = p.format_guide || null;
+    const open = h("button", { class: "ex-link pr-title", "aria-haspopup": "dialog", title: "Show this topic's history, past questions and format guide",
+      onclick: (e) => { e.stopPropagation(); openTopic(p.topic_id); } }, p.label);
+    const path = unitPath(p.topic_id);
+    const el = h("article", { class: "topic-card" },
+      h("div", { class: "rank", title: "Rank" }, String(p.rank)),
+      h("div", { class: "pr-body" },
+        h("dl", { class: "pr-fields" },
+          item("Predicted topic", open, path ? h("div", { class: "help" }, path) : null),
+          item("Priority", priorityField(p)),
+          item("Likelihood", likelihoodField(p, calibrated)),
+          item("Historical support", historyField(p)),
+          g ? item("General question format", h("strong", {}, g.display), " ", formatEvidenceTag(g),
+            g.description ? h("div", {}, describeFormat(g)) : null) : null),
+        g ? formatDetails(g) : null));
+    el.addEventListener("click", (e) => {
+      if (e.target.closest("a, button, details, input, select, label")) return;
+      if (String(window.getSelection() || "").trim()) return;  // the student is selecting text
+      openTopic(p.topic_id);
+    });
     return el;
+  }
+
+  function unitPath(topicId) {
+    const out = [];
+    for (let n = nodeById.get((nodeById.get(topicId) || {}).parent_id); n; n = nodeById.get(n.parent_id)) out.unshift(nodeLabel(n));
+    return out.join(" › ");
+  }
+
+  function item(label, ...value) {
+    return [h("dt", {}, label), h("dd", {}, value)];
+  }
+
+  function priorityField(p) {
+    const total = p.uncertainty && typeof p.uncertainty === "object" ? p.uncertainty.topics : null;
+    return [h("span", { class: "badge pr-prio" }, h("span", { class: "ex-dot", style: { background: priorityColor(p) } }), priorityWord(p)),
+      ` rank ${p.rank}${total ? ` of ${total}` : ""} `, kindTag("model")];
+  }
+
+  function likelihoodField(p, calibrated) {
+    const cal = (p.calibrated ?? calibrated) && p.probability !== null && p.probability !== undefined;
+    const known = (v) => v !== null && v !== undefined;
+    const range = rankRangeText(p);
+    const width = cal ? p.probability : p.relative_score;
+    return [
+      cal ? h("span", { title: SEPARATE_NOTE }, `${pct(p.probability)} chance of appearing`,
+        known(p.prob_low) && known(p.prob_high) ? ` (range ${Math.round(100 * p.prob_low)}-${Math.round(100 * p.prob_high)}%)` : "")
+        : h("span", {}, `Relative score ${num(p.relative_score, 2)} (not a probability)`, p.confidence ? ` · Confidence ${p.confidence}` : ""),
+      " ", kindTag(cal ? "estimate" : "model"),
+      range ? h("div", { class: "help" }, range) : null,
+      h("div", { class: "bar" }, h("div", { style: { width: `${Math.round(100 * (width || 0))}%`, background: priorityColor(p) } }))];
+  }
+
+  // From the run's topic history; runs made before it existed only have the older facts.
+  function historyField(p) {
+    const hs = p.history || null;
+    const f = p.facts || {};
+    const a = hs ? hs.exam_frequency : f.appearances;
+    const T = hs ? hs.usable_papers : f.exams;
+    const n = hs ? hs.question_frequency : f.questions_total;
+    const last = hs ? hs.last_label : f.last_label;
+    if (a === undefined || a === null) return h("span", { class: "muted" }, "Not recorded for this analysis.");
+    const top = hs && hs.top_format;
+    if (a === 0) {
+      return [`No historical evidence in the ${plural(T || 0, "usable paper")}. `, kindTag("fact"),
+        h("div", { class: "help" }, "Not appearing before is not evidence that it will not be examined.")];
+    }
+    return [`Appeared in ${a} of ${T} usable papers; ${plural(n || 0, "question")}${last ? `; last appeared ${last}` : ""}. `, kindTag("fact"),
+      top ? h("div", { class: "help" }, `Most common format: ${top.display} in ${plural(top.papers, "paper")}`) : null,
+      hs && hs.provisional ? h("div", {}, h("span", { class: "badge warn", title: (hs.provisional_reasons || []).join("; ") }, "Counts provisional")) : null];
+  }
+
+  // The description repeats the format name ("Numerical problem: calculate ..."); the card shows the name already.
+  function describeFormat(g) {
+    const d = String(g.description || "");
+    const prefix = `${g.display}:`.toLowerCase();
+    if (!d.toLowerCase().startsWith(prefix)) return d;
+    const rest = d.slice(prefix.length).trim();
+    return rest ? rest[0].toUpperCase() + rest.slice(1) : d;
+  }
+
+  function formatDetails(g) {
+    const il = g.illustrative || null;
+    const first = il ? String(il.text || "").split("\n")[0] : "";
+    const alts = (g.alternatives || []).slice(0, 2);
+    return h("details", { class: "pr-details" },
+      h("summary", {}, h("span", { class: "pr-sum-label" }, "Question format details"), first ? h("span", { class: "pr-sum-q" }, first) : null),
+      il ? illustrativeBlock(il) : g.illustrative_note ? h("p", { class: "help" }, g.illustrative_note) : null,
+      g.template ? templateBlock(g.template) : null,
+      g.why ? h("p", {}, h("strong", {}, "Why this format: "), g.why) : null,
+      g.marks_note ? h("p", { class: "help" }, g.marks_note) : null,
+      g.reliability && g.reliability.text ? h("p", { class: "help" }, g.reliability.text) : null,
+      alts.length ? h("div", {}, h("strong", {}, "Alternative formats"),
+        h("ul", { class: "evidence" }, alts.map(x => h("li", {}, h("strong", {}, x.display), x.support ? `: ${x.support}` : "")))) : null);
+  }
+
+  // The same topic panel as the Syllabus Explorer, in a wide drawer. Links inside it open other syllabus items
+  // in the same drawer; "Open in Syllabus Explorer" leaves this tab (the drawer closes on the route change).
+  function openTopic(topicId) {
+    const top = h("div");
+    const box = h("div");
+    const d = drawer(h("div", { class: "pr-drawer" }, top, box), { wide: true, label: "Topic details" });
+    let token = 0;
+    async function load(id) {
+      const t = ++token;
+      clear(box);
+      box.appendChild(h("div", { class: "card ex-loading", role: "status" }, "Loading..."));
+      try {
+        const data = await api.get(`/api/courses/${course.id}/explorer/nodes/${id}`);
+        if (t !== token || !d.panel.isConnected) return;
+        renderNodePanel(box, data, { courseId: course.id, nodes, explorerLink: true, onNavigate: load, onChanged: changed });
+        d.panel.scrollTop = 0;
+      } catch (e) {
+        if (t !== token) return;
+        clear(box);
+        box.appendChild(h("div", { class: "banner bad" }, `Could not load this topic: ${e.message}`));
+      }
+    }
+    // A mapping was corrected or reset in the drawer: the results are out of date until the next analysis.
+    async function changed() {
+      let fr;
+      try { fr = await api.get(`/api/courses/${course.id}/freshness`); } catch (e) { toast(e.message, "error"); return; }
+      clear(top);
+      append(top, freshnessBanner(fr, { courseId: course.id, onStart: () => { d.close(); start(); } }));
+      if (fresh) { clear(fresh); append(fresh, freshnessBanner(fr, { courseId: course.id, onStart: start })); }
+    }
+    load(topicId);
   }
 
   // Initial state: show an active run if one is going, else the latest results.
   const runs = await api.get(`/api/courses/${course.id}/runs`);
   const active = runs.find(r => r.status === "queued" || r.status === "running");
   if (active) poll(active.id); else await showResults();
-}
-
-export async function openTopic(runId, topicId, calibrated) {
-  const d = await api.get(`/api/runs/${runId}/topics/${topicId}`);
-  const p = d.prediction;
-  const content = h("div");
-  const add = (...items) => append(content, items);
-  drawer(content);
-  add(h("h2", {}, d.topic.path), h("p", { class: "muted" }, d.topic.concepts && d.topic.concepts.length ? `Concepts: ${d.topic.concepts.join("; ")}` : ""));
-  if (p) {
-    const u = p.uncertainty || {};
-    add(h("div", { class: "row" }, badge(p.category, "info"), badge(`${p.confidence} confidence`),
-      calibrated && p.probability !== null ? badge(`${pct(p.probability)} (${pct(p.prob_low)} to ${pct(p.prob_high)})`, "ok")
-        : badge(`relative score ${num(p.relative_score, 2)}`), badge(`rank ${p.rank}`),
-      u.rank_low ? badge(`rank range ${u.rank_low}-${u.rank_high} (${(u.level || "").toLowerCase()} uncertainty)`) : null,
-      p.evidence_strength ? badge(`evidence ${p.evidence_strength.toLowerCase()}`) : null));
-    if ((p.facts || {}).evidence_summary) add(h("p", { class: "muted", style: { margin: "8px 0 0" } }, p.facts.evidence_summary));
-    add(h("h3", { style: { marginTop: "14px" } }, "Why this topic ranked here"),
-      h("ul", { class: "evidence" }, p.evidence.map(e => h("li", {}, e))));
-    if (p.why_not && p.why_not.length) {
-      add(h("h3", {}, "Why it is not ranked higher"), h("ul", { class: "evidence" }, p.why_not.map(e => h("li", {}, e))));
-    }
-    const f = p.facts || {};
-    const shares = Object.entries(p.contributions || {}).sort((a, b) => b[1] - a[1]);
-    if (shares.length) {
-      const max = Math.max(...shares.map(([, v]) => v), 0.01);
-      add(h("h3", {}, "Model contributions"),
-        h("p", { class: "help" }, `Each component's share of the final score: ${p.contribution_source}. The shares add up to the topic's score.`),
-        shares.map(([k, v]) => shareBar(k, v, max, v.toFixed(3))));
-    }
-    const b = f.bayes;
-    if (b) {
-      add(h("h3", {}, "Bayesian recurrence"),
-        h("dl", { class: "facts" },
-          h("dt", {}, "Chance of appearing"), h("dd", {}, `${pct(b.posterior_mean)} (median ${pct(b.posterior_median)})`),
-          h("dt", {}, `${Math.round(100 * b.interval_level)}% credible interval`), h("dd", {}, `${pct(b.credible_interval[0])} to ${pct(b.credible_interval[1])}`),
-          h("dt", {}, "Observed"), h("dd", {}, `${b.observed.appearances} of ${b.observed.exams} paper(s)`),
-          h("dt", {}, "From the prior"), h("dd", {}, `${pct(b.prior_contribution)} (unit and course rate; shrinks as papers accumulate)`),
-          h("dt", {}, "Effective sample size"), h("dd", {}, num(b.effective_sample_size, 1)),
-          h("dt", {}, "Recency discount"), h("dd", {}, b.half_life ? `half-life ${b.half_life} papers` : "none")));
-    }
-    if (f.temporal_mode) {
-      add(h("h3", {}, "Temporal pattern"),
-        h("p", {}, `Used: ${f.temporal_mode}.`, f.temporal_log_bayes_factor !== undefined && f.temporal_log_bayes_factor !== null
-          ? ` Gap hazard vs constant rate on earlier papers: log Bayes factor ${num(f.temporal_log_bayes_factor, 2)} (positive favours the hazard).` : ""));
-    }
-    if (f.semantic_evidence && f.semantic_evidence.length) {
-      add(h("h3", {}, "Semantic evidence"),
-        h("p", { class: "help" }, "Past in-syllabus questions closest in meaning to this topic (pretrained model)."),
-        h("ul", { class: "evidence" }, f.semantic_evidence.map(e => h("li", {},
-          `${e.exam}: "${e.text}" `, h("span", { class: "muted" }, `similarity ${num(e.similarity, 2)}${e.mapped_here ? ", mapped to this topic" : ""}`)))));
-    }
-    const contrib = Object.entries(p.signal_contributions || {});
-    if (contrib.length) {
-      const max = Math.max(...contrib.map(([, v]) => Math.abs(v)), 0.01);
-      add(h("details", { style: { marginTop: "10px" } }, h("summary", {}, "Signal contributions (course-specific logistic model)"),
-        h("p", { class: "help" }, `${p.signal_source}. Several signals measure similar things (frequency, recency, Bayesian rate), `,
-          "so one can carry a large negative value while a related one carries a large positive value. Read the sum, ",
-          "not individual signs; the model contributions above are the main explanation."),
-        contrib.sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).map(([k, v]) => h("div", { class: "contrib" },
-          h("span", {}, k),
-          h("div", { class: "track" }, h("div", { class: "mid" }),
-            v >= 0 ? h("div", { class: "pos", style: { width: `${50 * Math.abs(v) / max}%` } }) : h("div", { class: "neg", style: { width: `${50 * Math.abs(v) / max}%` } })),
-          h("span", { class: "mono" }, (v >= 0 ? "+" : "") + v.toFixed(2))))));
-    }
-  }
-  if (d.formulations.length) {
-    add(h("h3", {}, "Predicted question formulations"),
-      h("p", { class: "help" }, "Built only from this course's past wording and syllabus phrases. They show likely forms, not the actual exam questions."),
-      d.formulations.map(f => h("div", { class: "formulation" },
-        h("div", { class: "tag" }, "PREDICTED QUESTION FORMULATION"),
-        h("div", {}, f.text),
-        h("div", { class: "help" }, [`format: ${f.format}`, f.marks_low !== null ? `marks ${f.marks_low === f.marks_high ? f.marks_low : `${f.marks_low}-${f.marks_high}`}` : null,
-          f.basis === "historical_variant" ? "reused past numerical (numbers not invented)" : "template from past openers + syllabus phrase",
-          f.evidence_question_ids.length ? `based on ${f.evidence_question_ids.length} past question(s)` : null].filter(Boolean).join(" | ")),
-        f.grounding && f.grounding.note ? h("div", { class: "help" }, f.grounding.note) : null,
-        f.grounding && f.grounding.checks ? h("div", { class: "help" }, "Checks passed: syllabus wording, topic, semantic fit, question type.") : null)));
-  }
-  if (d.families.length) {
-    add(h("h3", {}, "Recurring questions"),
-      h("ul", { class: "evidence" }, d.families.slice(0, 6).map(f => h("li", {}, `${f.question_ids.length} similar question(s) in ${f.exams.join(", ")}`))));
-  }
-  add(h("h3", {}, `Past questions on this topic (${d.questions.length})`),
-    d.questions.length ? table([
-      { label: "Paper", render: q => h("div", {}, q.exam, h("div", { class: "help" }, q.path_label)) },
-      { label: "Question", render: q => q.text },
-      { label: "Marks", key: "marks", num: true },
-      { label: "Type", render: q => (q.types || []).slice(0, 2).join(", ") },
-      { label: "Mapping", render: q => h("div", {}, statusBadge(q.mapping.status), h("div", { class: "help" }, pct(q.mapping.confidence))) },
-    ], d.questions) : h("p", { class: "muted" }, "None."));
-  const refs = d.topic.source_refs || [];
-  if (refs.length) {
-    add(h("h3", {}, "Where it is in the course contents"),
-      h("ul", { class: "evidence" }, refs.slice(0, 5).map(r => h("li", {}, `${r.file || ""}${r.page ? `, page ${r.page}` : ""}${r.line ? `, line ${r.line}` : ""}: `, h("span", { class: "muted" }, r.text || "")))));
-  }
 }
