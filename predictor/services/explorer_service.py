@@ -21,7 +21,7 @@ from sqlalchemy import select
 
 from ..analysis.topic_history import node_index, node_stats, timeline
 from ..database.models import (AnalysisArtifact, AnalysisRun, Course, CourseTopic, DocumentPage, Exam, ExamQuestion,
-                               PredictedQuestion, Prediction, SourceFile)
+                               PredictedQuestion, Prediction, QuestionTopicMapping, SourceFile)
 from ..parsing.format_labels import display as label_display
 from ..prediction.priority_reason import priority_word
 from ..syllabus.tree import TopicTree
@@ -149,7 +149,7 @@ class ExplorerService:
             out["prediction"] = prediction_dict(p) if p is not None else None
             if p is None:
                 out["child_predictions"] = [
-                    {"topic_id": tid, "label": preds[tid].label, "rank": preds[tid].rank,
+                    {"topic_id": tid, "label": _label(tree, tid), "rank": preds[tid].rank,
                      "priority": priority_word(preds[tid].category or ""), "category": preds[tid].category}
                     for tid in [node_id] + tree.descendants(node_id) if tid in preds]
                 out["child_predictions"].sort(key=lambda d: d["rank"])
@@ -174,9 +174,15 @@ class ExplorerService:
         papers = history["papers"]
         hq = history["questions"]
         ids = [int(k) for k in roles]
-        rows = {q.id: q for q in s.execute(select(ExamQuestion).where(ExamQuestion.id.in_(ids))).scalars()} if ids else {}
-        files = _files_for(s, {q.exam_id for q in rows.values()})
+        # Earlier questions are looked up too, so their question numbers show even when they are not on this node.
+        earlier_ids = {e for k in roles for e in (hq[k].get("prev") or [])}
+        wanted = set(ids) | earlier_ids
+        rows = ({q.id: q for q in s.execute(select(ExamQuestion).where(ExamQuestion.id.in_(wanted))).scalars()}
+                if wanted else {})
+        files = _files_for(s, {rows[i].exam_id for i in ids if i in rows})
+        live = _live_manual(s, tree, ids)
         member = set([node_id] + tree.descendants(node_id))
+        is_group = node_id not in set(tree.topic_ids()) and bool(tree.kids(node_id))
         out = []
         for key, role in roles.items():
             qid = int(key)
@@ -190,10 +196,11 @@ class ExplorerService:
                                  "relation_text": RELATION_TEXT.get(h["rel"], ""),
                                  "earlier": [_earlier(hq, papers, rows, e) for e in h.get("prev", [])][:6],
                                  "provisional": _q_provisional(h, paper),
-                                 "other_topics": [{"id": tree.topic_of(n) if n in tree.nodes else n,
-                                                   "label": tree.nodes[n].label() if n in tree.nodes else str(n),
-                                                   "role": "primary" if r == 1 else "secondary"}
-                                                  for n, r, _ in h["nodes"] if n not in member]}
+                                 "other_topics": _topics_of(tree, h["nodes"], lambda n: n not in member)}
+            if is_group:
+                # A unit lists questions from all its topics: say which topic each one belongs to.
+                d["topics"] = _topics_of(tree, h["nodes"], lambda n: n in member)
+            d.update(_mapping_now(h, live.get(qid)))
             if q is None:
                 d.update({"missing": True, "text": None})
             else:
@@ -211,14 +218,17 @@ class ExplorerService:
         if not ids:
             return []
         rows = {q.id: q for q in s.execute(select(ExamQuestion).where(ExamQuestion.id.in_(ids))).scalars()}
+        live = _live_manual(s, tree, ids)
         out = []
         for qid in ids:
             h = history["questions"][str(qid)]
             q = rows.get(qid)
-            out.append({"id": qid, "paper": history["papers"][h["e"]]["label"], "status": h["status"],
-                        "text": q.text if q else None, "question": q.path_label if q else None,
-                        "matches": [{"id": n, "label": tree.nodes[n].label() if n in tree.nodes else str(n),
-                                     "status": st, "score": sc} for n, st, sc in h.get("uncounted", [])]})
+            d = {"id": qid, "paper": history["papers"][h["e"]]["label"], "status": h["status"],
+                 "text": q.text if q else None, "question": q.path_label if q else None, "manual": h.get("manual", False),
+                 "matches": [{"id": n, "label": _label(tree, n) if n in tree.nodes else str(n),
+                              "status": st, "score": sc} for n, st, sc in h.get("uncounted", [])]}
+            d.update(_mapping_now(h, live.get(qid)))
+            out.append(d)
         return out
 
     # ------------------------------------------------------------------ sources
@@ -250,6 +260,16 @@ class ExplorerService:
 
     def page_image(self, file_id: int, page_no: int, highlight: str = "") -> bytes:
         """The PDF page as PNG, with the passage highlighted when it can be found on the page."""
+        return self.page_image_box(file_id, page_no, highlight)[0]
+
+    def page_image_box(self, file_id: int, page_no: int, highlight: str = ""
+                       ) -> tuple[bytes, tuple[float, float] | None]:
+        """(PNG of the PDF page with the passage highlighted, (top, bottom) of the highlight as fractions of the page
+        height, or None when the passage was not found on the page).
+
+        The passage is found by its opening words, then the rest of it is followed in short runs of words, so a
+        question that spans several lines is highlighted in full.
+        """
         try:
             import pymupdf as fitz  # PyMuPDF, a core dependency
         except ImportError:  # pragma: no cover - PyMuPDF before 1.24
@@ -265,19 +285,58 @@ class ExplorerService:
             if not 1 <= page_no <= doc.page_count:
                 raise KeyError(page_no)
             page = doc[page_no - 1]
-            needle = re.sub(r"\s+", " ", highlight or "").strip()
-            for probe in (needle[:80], needle[:40], needle[:24]):
-                if len(probe) < 6:
-                    break
-                rects = page.search_for(probe)
-                if rects:
-                    for r in rects[:4]:
-                        page.add_highlight_annot(r)
-                    break
+            hits = _find_passage(page, re.sub(r"\s+", " ", highlight or "").strip())
+            for r in hits:
+                page.add_highlight_annot(r)
             pix = page.get_pixmap(matrix=fitz.Matrix(1.6, 1.6), annots=True)
-            return pix.tobytes("png")
+            box = None
+            if hits:
+                height = page.rect.height or 1.0
+                box = (max(0.0, min(r.y0 for r in hits) / height), min(1.0, max(r.y1 for r in hits) / height))
+            return pix.tobytes("png"), box
         finally:
             doc.close()
+
+
+def _find_passage(page, needle: str, run: int = 5, max_rects: int = 40) -> list:
+    """Rectangles covering ``needle`` on a PyMuPDF page: the first match of its opening words, then each following
+    run of words found below it (a short run may also occur elsewhere on the page, so only matches close below the
+    last one count)."""
+    anchor = []
+    for probe in (needle[:80], needle[:40], needle[:24]):
+        if len(probe) < 6:
+            break
+        anchor = page.search_for(probe)
+        if anchor:
+            break
+    if not anchor:
+        return []
+    hits = list(anchor[:4])
+    words = needle.split()
+    line = max((r.y1 - r.y0) for r in hits) or 12.0
+    bottom = max(r.y1 for r in hits)
+    top = min(r.y0 for r in hits)
+    for i in range(0, len(words), run):
+        chunk = " ".join(words[i:i + run])
+        if len(chunk) < 6:
+            continue
+        added = False
+        for r in page.search_for(chunk):  # one rectangle per line of a match
+            if not top - 2 <= r.y0 <= bottom + 2.5 * line:
+                if added:
+                    break
+                continue
+            added = True
+            bottom = max(bottom, r.y1)
+            same = next((k for k, h in enumerate(hits) if abs(h.y0 - r.y0) < line / 2 and r.x0 <= h.x1 and h.x0 <= r.x1),
+                        None)
+            if same is None:
+                hits.append(r)
+            else:
+                hits[same] = hits[same] | r  # the same line: one wider highlight, not two overlapping ones
+        if len(hits) >= max_rects:
+            break
+    return hits
 
 
 # ---------------------------------------------------------------------- helpers
@@ -317,10 +376,10 @@ def _node_info(t: CourseTopic, tree: TopicTree, topic_set: set[int]) -> dict[str
     m = LEVEL_WORD.match(original or "")
     inferred, reason = _inferred(t, original)
     return {"id": t.id, "parent_id": t.parent_id, "depth": t.depth, "number": t.number, "title": t.title,
-            "label": tree.nodes[t.id].label() if t.id in tree.nodes else t.title, "original": original,
+            "label": _label(tree, t.id) if t.id in tree.nodes else t.title, "original": original,
             "level": level, "level_word": m.group(1).capitalize() if m else None, "children": kids,
             "concepts": list(t.concepts or []), "kinds": list(t.kinds or []), "excluded": bool(t.excluded),
-            "is_lab": "lab" in (t.kinds or []), "inferred": inferred, "inferred_reason": reason,
+            "is_lab": _is_lab(tree, t.id) or "lab" in (t.kinds or []), "inferred": inferred, "inferred_reason": reason,
             "user_edited": bool(t.user_edited), "has_source": bool(refs), "hours": t.hours,
             "description": t.description or ""}
 
@@ -369,6 +428,71 @@ def _files_for(s, exam_ids: set[int]) -> dict[int, dict[str, Any]]:
 
 def _is_pdf(src: SourceFile | None) -> bool:
     return bool(src is not None and ((src.mime or "").endswith("pdf") or (src.filename or "").lower().endswith(".pdf")))
+
+
+def _is_lab(tree: TopicTree, nid: int) -> bool:
+    """A laboratory or practical item: it, or a group above it, is marked as lab work in the syllabus."""
+    return nid in tree.nodes and any("lab" in (tree.nodes[i].kinds or []) for i in [nid, *tree.ancestors(nid)])
+
+
+def _label(tree: TopicTree, nid: int) -> str:
+    """The node's label for lists that leave the tree (other topics, matches, rankings). Practical items are numbered
+    on their own ("1. Determination of ..."), so "Practical 1" keeps them apart from unit 1."""
+    node = tree.nodes[nid]
+    lab_parent = any("lab" in (tree.nodes[a].kinds or []) for a in tree.ancestors(nid))
+    if lab_parent and node.number and node.number != "•":
+        return f"Practical {node.number}: {node.title}"
+    return node.label()
+
+
+def _topics_of(tree: TopicTree, nodes: list[list[Any]], keep) -> list[dict[str, Any]]:
+    """The topics a question's counted mappings roll up to (one entry per topic, primary first)."""
+    best = min((r for _, r, _ in nodes), default=1)
+    out: dict[int, dict[str, Any]] = {}
+    for n, r, _ in sorted(nodes, key=lambda x: x[1]):
+        if not keep(n):
+            continue
+        tid = tree.topic_of(n) if n in tree.nodes else n
+        if tid in out:
+            continue
+        out[tid] = {"id": tid, "label": _label(tree, tid) if tid in tree.nodes else str(tid),
+                    "role": "primary" if r == best else "secondary"}
+    return list(out.values())
+
+
+def _live_manual(s, tree: TopicTree, qids: list[int]) -> dict[int, dict[str, Any]]:
+    """Corrections saved since the run (method 'manual'), so the panel can show them before the next analysis."""
+    if not qids:
+        return {}
+    out: dict[int, dict[str, Any]] = {}
+    rows = s.execute(select(QuestionTopicMapping).where(QuestionTopicMapping.question_id.in_(qids),
+                                                        QuestionTopicMapping.method == "manual")
+                     .order_by(QuestionTopicMapping.rank)).scalars()
+    for m in rows:
+        d = out.setdefault(m.question_id, {"status": m.status, "topics": []})
+        if m.topic_id is not None:
+            d["topics"].append({"id": m.topic_id, "label": _label(tree, m.topic_id) if m.topic_id in tree.nodes
+                                else str(m.topic_id), "role": "primary" if not d["topics"] else "secondary"})
+    return out
+
+
+def _mapping_now(h: dict[str, Any], live: dict[str, Any] | None) -> dict[str, Any]:
+    """The question's current mapping when it differs from what the analysis used.
+
+    ``manual_now``: a correction is saved now. ``pending``: the saved state differs from the run's (a correction
+    saved, changed or removed since the analysis), so it applies after re-analysis.
+    """
+    manual_now = live is not None
+    out: dict[str, Any] = {"manual_now": manual_now, "manual_mapping": live}
+    if manual_now != bool(h.get("manual")):
+        out["pending"] = True
+    elif manual_now:
+        run_topics = [int(n) for n, r, _ in sorted(h["nodes"], key=lambda x: x[1])]
+        live_topics = [t["id"] for t in live["topics"]]
+        out["pending"] = run_topics != live_topics or (live["status"] != h.get("status"))
+    else:
+        out["pending"] = False
+    return out
 
 
 def _earlier(hq: dict[str, Any], papers: list[dict[str, Any]], rows: dict[int, ExamQuestion], qid: int

@@ -36,12 +36,13 @@ QUANTITY_NOUNS = {
     "enthalpy", "entropy", "flux", "yield", "dose", "size", "cost", "interest", "population", "deflection",
 }
 UNIT_DIMENSIONS = [
-    (r"m3/s|m\^3/s|cumecs?|l/s|lps|litres? per second|liters? per second|m3/min", "flow rate"),
+    (r"m3/s|m\^3/s|cumecs?|l/s|lps|litres?/s|liters?/s|litres?/min|liters?/min|l/min|litres? per second|"
+     r"liters? per second|m3/min", "flow rate"),
     (r"m/s2|m/s\^2", "acceleration"),
     (r"m/s|km/h|km/hr|kmph|cm/s|mm/s|ft/s", "velocity"),
     (r"kg/m3|kg/m\^3|g/cm3", "density"),
+    (r"pa\.s|pa-s|n\.?s/m2|poise|centipoise|cp|stokes?|m2/s", "viscosity"),
     (r"n/m2|kn/m2|n/mm2|kpa|mpa|gpa|pa|bar|atm|mm of mercury|mm of hg|cm of mercury|psi", "pressure"),
-    (r"pa\.?s|poise|centipoise|cp|stokes?|m2/s", "viscosity"),
     (r"m2|m\^2|cm2|mm2|sq\.? ?m|hectares?|ha", "area"),
     (r"m3|m\^3|cm3|litres?|liters?|ml", "volume"),
     (r"km|cm|mm|m|ft|inch(?:es)?|in", "length"),
@@ -178,6 +179,7 @@ def numeric_template(text: str) -> tuple[str, list[dict[str, str]]]:
     "a pipe of 300 mm diameter" -> "a pipe of [diameter in mm]". Returns (template, placeholders)."""
     t = clean_question(text)
     out, pos, placeholders = [], 0, []
+    named: list[tuple[str, str]] = []  # (unit, name) of values named by a quantity word in the question
     for m in NUMBER_UNIT.finditer(t):
         value, unit = m.group(1), m.group(2)
         start, end = m.span()
@@ -185,6 +187,16 @@ def numeric_template(text: str) -> tuple[str, list[dict[str, str]]]:
         name, consumed = _name_after(after) if unit else (None, 0)
         if not name:
             name = _name_before(t[:start])
+        if not name and unit:
+            # "A pipe of 15 cm diameter suddenly enlarges to 30 cm": a later value in the same unit with no word of
+            # its own is the next value of the same quantity ("second diameter"), not a generic length.
+            same = [n for u, n in named if u.lower() == unit.lower()]
+            if same:
+                base = same[-1].split(" ", 1)[1] if same[-1].split(" ", 1)[0] in ORDINALS else same[-1]
+                count = sum(1 for n in same if n == base or n.endswith(f" {base}"))
+                name = f"{ORDINALS[min(count, len(ORDINALS)) - 1]} {base}"
+        if name and unit:
+            named.append((unit, name))
         if not name:
             name = _dimension(unit) if unit else "value"
         label = f"[{name} in {unit}]" if unit else f"[{name}]"
@@ -197,6 +209,9 @@ def numeric_template(text: str) -> tuple[str, list[dict[str, str]]]:
     return template, placeholders
 
 
+ORDINALS = ["second", "third", "fourth", "fifth"]
+
+
 def _name_after(after: str) -> tuple[str | None, int]:
     m = re.match(r"\s+([a-z]+)(\s+(?:factor|coefficient|gradient|ratio))?\b", after, flags=re.I)
     if m and m.group(1).lower() in QUANTITY_NOUNS:
@@ -206,10 +221,11 @@ def _name_after(after: str) -> tuple[str | None, int]:
 
 
 def _name_before(before: str) -> str | None:
-    words = re.findall(r"[A-Za-z]+|=|:", before)[-5:]
+    words = re.findall(r"[A-Za-z]+|=|:", before)[-8:]
     for i in range(len(words) - 1, -1, -1):
         w = words[i].lower()
-        if w in SKIP_BACK:
+        # "with diameters 500 mm, 400 mm and 300 mm": skip the units of the earlier values in the same list.
+        if w in SKIP_BACK or re.fullmatch(_UNIT_RE, w, flags=re.I):
             continue
         if w.rstrip("s") in QUANTITY_NOUNS and w not in QUANTITY_NOUNS:
             w = w.rstrip("s")
@@ -243,6 +259,10 @@ def numeric_target(text: str) -> tuple[str | None, str | None]:
     target = rest[: stop.start()] if stop else rest
     target = re.sub(r"\s+(?:of|in|at|for|with|on|by|to|from|a|an|the)$", "", target.strip(), flags=re.I)
     target = re.sub(r"\s+(?:of|in|at|for|with|on|by|to|from|a|an|the)$", "", target.strip(), flags=re.I)
+    # "the diameter of a single equivalent pipe of length [value]": drop the quantity whose value was cut off.
+    m2 = re.search(r"\s+(?:of|with|at)\s+([a-z]+)$", target, flags=re.I)
+    if m2 and m2.group(1).lower() in QUANTITY_NOUNS:
+        target = target[: m2.start()]
     if len(target.split()) < 2:
         return None, m.group(1).lower()
     return _trim_words(target, 12), m.group(1).lower()
@@ -297,6 +317,12 @@ def build_format_guide(*, topic_label: str, topic_title: str, kinds: set[str], c
     T = len(papers)
     a = stats.get("exam_frequency", 0)
     in_family = [q for q in questions if family in q.get("families", [])]
+    # A format "established" by questions that are only probable (status B) matches to the topic is a weak
+    # indication: those questions may belong to another topic.
+    certain = {q["exam_index"] for q in in_family if q.get("status", "A") != "B" or q.get("manual")}
+    probable_only = basis == "history" and len(certain) < 2
+    if probable_only:
+        basis = "weak_history"
     rep = _representative(in_family, ctx)
     guide: dict[str, Any] = {
         "family": family, "display": family_display(family), "basis": basis,
@@ -307,21 +333,23 @@ def build_format_guide(*, topic_label: str, topic_title: str, kinds: set[str], c
     if fam_stats:
         guide["papers"], guide["questions"] = fam_stats["papers"], fam_stats["questions"]
         guide["last_label"] = papers[fam_stats["last_index"]]["label"] if fam_stats.get("last_index") is not None else None
-    guide["description"] = describe(family, rep, topic_title, concepts, in_family, ctx)
+    guide["description"] = describe(family, rep, topic_title, concepts, in_family, ctx,
+                                    "course" if basis in ("course_pattern", "none") else "syllabus")
     guide["template"] = None
     guide["illustrative"] = None
     if family in ("numerical", "design") and rep is not None:
         guide["template"], guide["illustrative"] = _numerical_parts(rep, family)
     guide["marks_note"] = _marks_text([float(q["marks"]) for q in in_family if q.get("marks") and q.get("role") == "primary"])
-    guide["why"] = _why(family, basis, guide, stats, kinds, course_families, T, papers)
-    guide["alternatives"] = [_alternative(alt, questions, topic_title, concepts, ctx) for alt in alternatives]
+    guide["why"] = _why(family, basis, guide, stats, kinds, course_families, T, papers,
+                        certain_papers=len(certain) if probable_only else None)
+    guide["alternatives"] = [_alternative(alt, questions, topic_title, concepts, ctx, a) for alt in alternatives]
     if reliability:
         guide["reliability"] = reliability
     return guide
 
 
 def describe(family: str, rep: dict[str, Any] | None, topic_title: str, concepts: list[str],
-             in_family: list[dict[str, Any]], ctx: "_Ctx | None" = None) -> str:
+             in_family: list[dict[str, Any]], ctx: "_Ctx | None" = None, source: str = "syllabus") -> str:
     """A specific, one-sentence description of the question structure for this family."""
     if family in ("numerical",) and rep is not None:
         target, verb = numeric_target(rep["text"])
@@ -361,6 +389,9 @@ def describe(family: str, rep: dict[str, Any] | None, topic_title: str, concepts
     obj = _phrase(concepts[0], ctx) if concepts else _phrase(topic_title, ctx)
     frame = FRAMES.get(family, "{verb} {obj}.")
     text = frame.format(verb=DEFAULT_VERBS.get(family, "explain"), obj=obj, assumptions="", sketch="", example="")
+    if source == "course":
+        return text.rstrip(".") + (" (format inferred from the course-wide mix of question formats, wording from the "
+                                   "syllabus entry; no past question on this topic exists).")
     return text.rstrip(".") + " (structure inferred from the syllabus entry; no past question of this kind exists)."
 
 
@@ -408,15 +439,20 @@ def _source(q: dict[str, Any]) -> dict[str, Any]:
 
 
 def _alternative(alt: dict[str, Any], questions: list[dict[str, Any]], topic_title: str,
-                 concepts: list[str], ctx: "_Ctx | None" = None) -> dict[str, Any]:
+                 concepts: list[str], ctx: "_Ctx | None" = None, topic_papers: int = 0) -> dict[str, Any]:
     fam = alt["family"]
     in_family = [q for q in questions if fam in q.get("families", [])]
     rep = _representative(in_family, ctx)
     out = {"family": fam, "display": family_display(fam), "papers": alt.get("papers", 0),
            "questions": alt.get("questions", 0), "description": describe(fam, rep, topic_title, concepts, in_family,
                                                                         ctx)}
-    out["support"] = (f"asked in {out['papers']} past paper(s)" if out["papers"]
-                      else "named in the syllabus entry (inferred)")
+    if out["papers"] and topic_papers:
+        out["support"] = (f"asked in {out['papers']} of the {_n(topic_papers, 'paper')} containing this topic"
+                          if topic_papers > 1 else "asked in the one paper containing this topic")
+    elif out["papers"]:
+        out["support"] = f"asked in {_n(out['papers'], 'past paper')}"
+    else:
+        out["support"] = "named in the syllabus entry (inferred)"
     if fam in ("numerical", "design") and rep is not None:
         out["template"], out["illustrative"] = _numerical_parts(rep, fam)
     return out
@@ -427,45 +463,67 @@ def _numerical_parts(rep: dict[str, Any], family: str) -> tuple[dict[str, Any] |
     template, placeholders = numeric_template(rep["text"])
     where = f"{rep.get('exam_label')} question {rep.get('path_label') or ''}".rstrip()
     tpl = ({"text": template, "placeholders": placeholders, "source": _source(rep),
-            "note": f"Every value is a placeholder; the wording follows the {where} question."} if placeholders else None)
+            "note": f"Every value is a placeholder; the wording follows {where}."} if placeholders else None)
+    # The practice question is the real past question, word for word (so its data are known to be consistent). It
+    # is labelled as a past question, never as a generated one.
     illustrative = {
         "text": clean_question(rep["text"]), "basis": "past_values", "format": family, "source": _source(rep),
-        "note": (f"Illustrative practice question, not a prediction of the actual wording. The values come from "
-                 f"{where}, a real past paper, so the data are known to be consistent; a new paper will use other "
-                 f"values. The app does not invent new values because it cannot check that they give a solvable "
-                 f"problem."),
+        "note": (f"This is {where} from a real past paper, word for word. A new paper will ask a similar question "
+                 f"with other values. The app does not invent new values because it cannot check that they give a "
+                 f"solvable problem."),
     }
     return tpl, illustrative
 
 
+def _n(n: int, word: str, many: str | None = None) -> str:
+    """'1 paper', '3 papers'."""
+    return f"{n} {word if n == 1 else (many or word + 's')}"
+
+
 def _why(family: str, basis: str, guide: dict[str, Any], stats: dict[str, Any], kinds: set[str],
-         course_families: list[dict[str, Any]], T: int, papers: list[dict[str, Any]]) -> str:
+         course_families: list[dict[str, Any]], T: int, papers: list[dict[str, Any]],
+         certain_papers: int | None = None) -> str:
     disp = family_display(family)
     a = stats.get("exam_frequency", 0)
+    fams = [f for f in stats.get("families", []) if f["family"] in FAMILIES]
+    tied = [f for f in fams if f["family"] != family and f["papers"] == guide["papers"]]
     if basis == "history":
         text = (f"{disp} questions appeared in {guide['papers']} of the {a} papers that contained this topic"
                 + (f", most recently {guide['last_label']}" if guide.get("last_label") else "") + ".")
-        fams = stats.get("families", [])
-        if len(fams) > 1:
+        if tied:
+            names = _join([f["display"].lower() for f in tied])
+            text += (f" {names[0].upper() + names[1:]} appeared in as many papers, so these formats are equally common; "
+                     f"{disp.lower()} is listed first only because it is the more specific format.")
+        elif len(fams) > 1:
             second = fams[1]
-            text += (f" The next most frequent format, {second['display'].lower()}, appeared in {second['papers']} "
-                     f"paper(s).")
+            text += (f" The next most frequent format, {second['display'].lower()}, appeared in "
+                     f"{_n(second['papers'], 'paper')}.")
         if stats.get("multi_label_questions"):
             text += " Some questions combine formats, so these counts overlap."
         return text
     if basis == "weak_history":
-        return (f"This topic appeared in {a} of {T} usable paper(s), and {disp.lower()} was asked in "
+        if certain_papers is not None:
+            certain = ("none of those questions is a certain match to this topic (all are probable matches, mapping "
+                       "status B)" if certain_papers == 0 else
+                       f"only {_n(certain_papers, 'of those papers', 'of those papers')} had a question that certainly "
+                       f"belongs to this topic (the others are probable matches, mapping status B)")
+            return (f"{disp} questions appeared in {guide['papers']} of the {a} papers that contained this topic, but "
+                    f"{certain}. Treat this format as a weak indication.")
+        text = (f"This topic appeared in {a} of {_n(T, 'usable paper')}, and {disp.lower()} was asked in "
                 f"{guide['papers']} of them. That is too little history to establish a pattern, so treat this format "
                 f"as a weak indication.")
+        if tied:
+            text += f" {_join([f['display'] for f in tied])} appeared as often."
+        return text
     if basis == "syllabus":
         named = ", ".join(sorted(k for k in kinds if k in KIND_FAMILY))
-        return (f"No past question on this topic was found in the {T} usable paper(s). Its syllabus entry names "
+        return (f"No past question on this topic was found in the {_n(T, 'usable paper')}. Its syllabus entry names "
                 f"'{named}', so {disp.lower()} is suggested. This format is inferred from the syllabus, not observed "
                 f"in past papers.")
     if basis == "course_pattern":
         top = course_families[0]
-        return (f"No past question on this topic was found in the {T} usable paper(s), and its syllabus entry names no "
-                f"format. {disp} is the most common format across this course ({top['questions']} of "
+        return (f"No past question on this topic was found in the {_n(T, 'usable paper')}, and its syllabus entry names "
+                f"no format. {disp} is the most common format across this course ({top['questions']} of "
                 f"{top['of_questions']} counted questions), so it is shown as a starting point. This format is "
                 f"inferred, not observed for this topic.")
     return ("No past papers and no format named in the syllabus: a conceptual explanation is shown as a generic "
@@ -481,7 +539,7 @@ def format_reliability(accuracy: dict[str, Any] | None) -> dict[str, Any] | None
     folds = topic.get("folds") or glob.get("folds")
     if not folds or topic.get("mean") is None:
         return None
-    text = (f"On {folds} earlier paper(s), the format a topic was asked in most often before matched a format it was "
+    text = (f"On {_n(folds, 'earlier paper')}, the format a topic was asked in most often before matched a format it was "
             f"actually asked in {topic['mean']:.0%} of the time")
     if glob.get("mean") is not None:
         text += f" (the course-wide format mix: {glob['mean']:.0%})"

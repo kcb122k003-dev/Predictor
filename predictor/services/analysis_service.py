@@ -548,7 +548,7 @@ class AnalysisService:
                     continue
                 qs.append({"id": q.id, "text": q.text, "labels": q.labels, "families": q.families, "marks": q.marks,
                            "exam_index": q.exam_index, "exam_label": infos[q.exam_index].label,
-                           "path_label": q.path_label, "role": role})
+                           "path_label": q.path_label, "role": role, "status": q.status, "manual": bool(q.manual)})
             node = tree.nodes[tid]
             kinds = set(node.kinds)
             concepts = list(node.concepts)
@@ -867,8 +867,10 @@ def _paper_quality(session, exam: Exam, src: SourceFile | None, rows: list[ExamQ
 
 def _question_infos(leaves: list[Leaf], recurrence) -> list[QuestionInfo]:
     out = []
+    families = {q.id: list(q.families) for q in leaves}
     for q in leaves:
-        rel, earlier = relation_of(q.id, recurrence.exact_prev, recurrence.para_prev, recurrence.concept_prev)
+        rel, earlier = relation_of(q.id, recurrence.exact_prev, recurrence.para_prev, recurrence.concept_prev,
+                                   families)
         out.append(QuestionInfo(
             id=q.id, exam_index=q.exam_index,
             nodes=[(nid, q.ranks.get(nid, i + 1), w) for i, (nid, w) in enumerate(q.counted)],
@@ -916,6 +918,7 @@ def _attach_illustrative(guide: dict[str, Any], forms: list[dict[str, Any]]) -> 
                 return {"text": f["text"], "basis": "generated", "format": family,
                         "evidence_question_ids": f.get("evidence_question_ids", []),
                         "marks_low": f.get("marks_low"), "marks_high": f.get("marks_high"),
+                        "marks_basis": (f.get("grounding") or {}).get("marks_basis"),
                         "note": "Illustrative practice question built from the syllabus wording and this course's own "
                                 "phrasing. It passed the syllabus, topic, semantic and question-type checks. It is not "
                                 "a prediction of the exact wording."}
@@ -925,7 +928,8 @@ def _attach_illustrative(guide: dict[str, Any], forms: list[dict[str, Any]]) -> 
         guide["illustrative"] = pick(guide.get("family", ""))
         if guide["illustrative"] is None:
             guide["illustrative_note"] = ("No practice question in this format passed the grounding checks; use the "
-                                          "description and the past questions instead.")
+                                          + ("description and the past questions instead." if guide.get("topic_papers")
+                                             else "description above instead."))
     for alt in guide.get("alternatives", []):
         if not alt.get("illustrative"):
             alt["illustrative"] = pick(alt["family"])

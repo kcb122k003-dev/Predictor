@@ -41,6 +41,9 @@
 }
 
 * { box-sizing: border-box; }
+/* The hidden attribute always hides, even on elements whose display is set below (buttons are inline-flex). */
+[hidden] { display: none !important; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 html, body { margin: 0; padding: 0; }
 body {
   background: var(--bg); color: var(--text);
@@ -162,6 +165,8 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 .pr-fields dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 .pr-fields .bar { max-width: 240px; }
 .topic-card .pr-title { font-weight: 600; font-size: .95rem; }
+.pr-original { font-size: .82rem; overflow-wrap: anywhere; }
+.pr-inferred { border-bottom: 1px dashed var(--muted); }
 .pr-prio { display: inline-flex; align-items: center; gap: 5px; color: var(--text); vertical-align: middle; }
 .pr-details { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); font-size: .88rem; overflow-wrap: anywhere; }
 .pr-details > summary { cursor: pointer; }
@@ -176,13 +181,25 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
   overflow-y: auto; padding: 20px 24px 60px; box-shadow: -4px 0 20px rgba(0,0,0,.15);
 }
 .drawer.wide { width: min(1080px, 100vw); }
+.drawer:focus { outline: none; }
+/* Close (and the drawer's actions) stay visible while the drawer scrolls. */
+.drawer-head {
+  position: sticky; top: -20px; z-index: 2; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  margin: -20px -24px 12px; padding: 10px 24px; background: var(--bg); border-bottom: 1px solid var(--border);
+}
 /* A modal opened from inside a drawer (View original, Correct mapping) covers the drawer too. */
 .drawer ~ .drawer-backdrop { z-index: 42; }
 .drawer ~ .modal { z-index: 43; }
 .modal {
-  position: fixed; top: 6vh; left: 50%; transform: translateX(-50%); width: min(900px, 94vw); max-height: 86vh; overflow-y: auto;
-  background: var(--bg); z-index: 41; border-radius: var(--radius); padding: 18px 22px; box-shadow: 0 10px 40px rgba(0,0,0,.25);
+  position: fixed; top: 6vh; left: 50%; transform: translateX(-50%); width: min(900px, 94vw); max-height: 86vh;
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--bg); z-index: 41; border-radius: var(--radius); box-shadow: 0 10px 40px rgba(0,0,0,.25);
 }
+/* The title and Close stay in view; only the body scrolls. */
+.modal-head { display: flex; gap: 12px; align-items: flex-start; padding: 14px 22px 10px; border-bottom: 1px solid var(--border); flex: 0 0 auto; }
+.modal-head h2 { flex: 1 1 auto; min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.modal-head h2:focus { outline: none; }
+.modal-body { overflow-y: auto; padding: 14px 22px 18px; min-height: 0; flex: 1 1 auto; }
 .close-x { float: right; }
 
 .share { display: grid; grid-template-columns: 220px 1fr 64px; gap: 8px; align-items: center; font-size: .85rem; margin-bottom: 4px; }
@@ -301,6 +318,7 @@ pre.pagetext { white-space: pre-wrap; background: var(--panel); border: 1px soli
 .ex-kind-illustrative { color: var(--warn); background: var(--warn-soft); border-color: var(--warn); border-style: dashed; }
 .ex-kind-inferred { color: var(--muted); background: transparent; border-color: var(--muted); border-style: dashed; }
 .ex-kind-weak { color: var(--warn); background: transparent; border-color: var(--warn); border-style: dotted; }
+.ex-kind-input { color: var(--text); background: var(--panel-2); border-color: var(--muted); border-style: double; border-width: 3px; line-height: 1.3; }
 .ex-prio { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
 .ex-prov { margin: 6px 0; }
 .ex-prov summary { cursor: pointer; }
@@ -326,6 +344,10 @@ pre.pagetext { white-space: pre-wrap; background: var(--panel); border: 1px soli
 .ex-guide-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .ex-template, .ex-illustrative { border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; margin: 8px 0; overflow-wrap: anywhere; }
 .ex-illustrative { border-style: dashed; border-color: var(--warn); background: var(--warn-soft); }
+/* A real past question offered for practice: a historical fact, styled apart from generated questions. */
+.ex-illustrative.ex-pastq { border-style: solid; border-color: var(--ok); background: var(--ok-soft); }
+.ex-pending { margin-top: 6px; padding: 4px 8px; border-left: 3px solid var(--warn); background: var(--warn-soft); font-size: .82rem; overflow-wrap: anywhere; }
+.ex-skip { font-size: .8rem; }
 .ex-template-text, .ex-illustrative-text { margin: 0 0 4px; }
 .ex-ph { background: var(--accent-soft); color: var(--accent); border: 1px dashed var(--accent); border-radius: 4px; padding: 0 3px; font-weight: 600; }
 .ex-alt { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px; }
@@ -353,6 +375,19 @@ mark.ex-hl { background: var(--warn-soft); color: var(--text); outline: 1px soli
 }
 @media (max-width: 520px) {
   .drawer { padding: 14px 14px 60px; }
+  .drawer-head { top: -14px; margin: -14px -14px 10px; padding: 8px 14px; }
+  .modal-head { padding: 12px 14px 8px; }
+  .modal-body { padding: 10px 14px 14px; }
+  /* Narrow tables in the topic panel: the items of a unit become stacked cards, the timeline wraps. */
+  table.ex-kids thead { display: none; }
+  table.ex-kids, table.ex-kids tbody, table.ex-kids tr, table.ex-kids td { display: block; width: 100%; }
+  table.ex-kids tr { padding: 6px 0; border-bottom: 1px solid var(--border); }
+  table.ex-kids td { border: none; padding: 1px 4px; text-align: left; }
+  table.ex-kids td.num { text-align: left; }
+  table.ex-kids td[data-label]::before { content: attr(data-label) ": "; color: var(--muted); }
+  .ex-kids td:first-child { min-width: 0; }
+  table.ex-timeline th, table.ex-timeline td { padding: 5px 4px; }
+  table.ex-timeline td:last-child { overflow-wrap: anywhere; }
   .ex-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .ex-pick-row { display: flex; flex-wrap: wrap; gap: 4px 16px; }
   .ex-pick-row .ex-pick-name { flex: 1 1 100%; }

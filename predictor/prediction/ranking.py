@@ -138,8 +138,8 @@ def build_topic_predictions(panel: Panel, report: BacktestReport, fm: FeatureMat
         strength = evidence_label(float(post.variance_ratio[i])) if post is not None else "Minimal"
         facts["evidence_summary"] = _evidence_summary(facts, strength)
         conf = _confidence(facts, p, lo, hi, probs is not None, unc)
-        evidence = _evidence_lines(panel, facts, syllabus_location.get(panel.item_ids[i]) if syllabus_location else None)
-        evidence += _model_lines(facts, unc, contributions[i] if contributions else None, strength)
+        evidence = evidence_lines(facts, unc, contributions[i] if contributions else None, strength,
+                                  syllabus_location.get(panel.item_ids[i]) if syllabus_location else None)
         preds.append(TopicPrediction(
             item_index=i, item_id=panel.item_ids[i], label=panel.item_labels[i], rank=int(ranks[i]),
             score=round(float(scores[i]), 5), relative_score=round(float(rel[i]), 4),
@@ -273,6 +273,12 @@ def _evidence_summary(facts: dict[str, Any], strength: str) -> str:
     3 questions) + strong syllabus match'."""
     T, a, nq = facts.get("exams", 0), facts.get("appearances", 0), facts.get("questions_total", 0)
     hist = {"Strong": "Strong", "Moderate": "Moderate", "Limited": "Sparse", "Minimal": "Very sparse"}.get(strength, strength)
+    # The word describes the topic's own history, so it is capped by its appearances: one or two papers are never
+    # strong evidence of a pattern, however precise the Bayesian estimate is (strength measures that precision).
+    if a <= 1:
+        hist = "Very sparse"
+    elif a == 2 and hist in ("Strong", "Moderate"):
+        hist = "Sparse"
     papers = f"{a} of {T} paper{'s' if T != 1 else ''}, {nq} question{'s' if nq != 1 else ''}"
     if a == 0:
         # A topic missing from every past paper is not shown as unlikely: there is simply no history for it.
@@ -288,6 +294,20 @@ def _evidence_summary(facts: dict[str, Any], strength: str) -> str:
     return text
 
 
+LOCATION_PREFIX = "Syllabus location: "
+
+
+def evidence_lines(facts: dict[str, Any], unc: dict[str, Any], contrib: dict[str, float] | None, strength: str,
+                   location: str | None) -> list[str]:
+    """The "why it ranked here" lines of a topic, from its stored facts.
+
+    Also used when a stored run is read, so runs analysed before a wording change show the current wording
+    (results_service.prediction_dict); ``location`` is then read back from the stored lines.
+    """
+    facts = {**facts, "evidence_summary": _evidence_summary(facts, strength)}
+    return _evidence_lines(None, facts, location) + _model_lines(facts, unc, contrib, strength)
+
+
 def _model_lines(facts: dict[str, Any], unc: dict[str, Any], contrib: dict[str, float] | None, strength: str) -> list[str]:
     lines = []
     if facts.get("evidence_summary"):
@@ -296,11 +316,16 @@ def _model_lines(facts: dict[str, Any], unc: dict[str, Any], contrib: dict[str, 
     if b:
         lo, hi = b["credible_interval"]
         obs = b["observed"]
-        lines.append(f"Bayesian recurrence: {_fmt_pct(b['posterior_mean'])} chance of appearing (80% credible interval "
-                     f"{_fmt_pct(lo)}-{_fmt_pct(hi)}), from {obs['appearances']} appearance(s) in {obs['exams']} paper(s); "
-                     f"{_fmt_pct(b['prior_contribution'])} of the estimate comes from the unit and course prior. "
-                     f"Evidence strength: {strength} (its posterior variance is {_fmt_pct(b['variance_ratio'])} of the "
-                     f"prior's).")
+        # A model input, not the topic's likelihood (that is the calibrated probability or the relative score), so
+        # it is never called a chance of appearing.
+        precision = {"Strong": "high", "Moderate": "moderate", "Limited": "low", "Minimal": "very low"}.get(strength,
+                                                                                                         strength)
+        lines.append(f"Bayesian recurrence rate (one input to the ranking, not the likelihood): "
+                     f"{_fmt_pct(b['posterior_mean'])} (80% credible interval {_fmt_pct(lo)}-{_fmt_pct(hi)}), from "
+                     f"{_plural(obs['appearances'], 'appearance')} in {_plural(obs['exams'], 'paper')}; "
+                     f"{_fmt_pct(b['prior_contribution'])} of the rate comes from the unit and course prior. "
+                     f"Precision of this rate: {precision} (its posterior variance is {_fmt_pct(b['variance_ratio'])} of "
+                     f"the prior's).")
     mode = facts.get("temporal_mode")
     if mode:
         bf = facts.get("temporal_log_bayes_factor")
@@ -315,9 +340,14 @@ def _model_lines(facts: dict[str, Any], unc: dict[str, Any], contrib: dict[str, 
         top = sorted(contrib.items(), key=lambda kv: -kv[1])[:3]
         lines.append("Largest contributions to the final score: " + ", ".join(f"{k} {v:.2f}" for k, v in top) + ".")
     if unc:
-        lines.append(f"Rank uncertainty: between {unc['rank_low']} and {unc['rank_high']} of {unc['topics']} "
-                     f"({unc['level'].lower()} uncertainty).")
+        span = (f"rank {unc['rank_low']} of {unc['topics']}" if unc['rank_low'] == unc['rank_high'] else
+                f"between {unc['rank_low']} and {unc['rank_high']} of {unc['topics']}")
+        lines.append(f"Rank uncertainty: {span} ({unc['level'].lower()} uncertainty).")
     return lines
+
+
+def _plural(n: int, word: str, many: str | None = None) -> str:
+    return f"{n} {word if n == 1 else (many or word + 's')}"
 
 
 def _evidence_lines(panel: Panel, f: dict[str, Any], location: str | None) -> list[str]:
@@ -326,45 +356,48 @@ def _evidence_lines(panel: Panel, f: dict[str, Any], location: str | None) -> li
     if T == 0:
         return ["No exams have been analysed yet."]
     if f["appearances"] == 0:
-        lines.append(f"Never appeared in the {T} supplied exams.")
+        lines.append(f"Never appeared in the {_plural(T, 'supplied paper')}.")
     else:
-        lines.append(f"Appeared in {f['recent_appearances']} of the last {f['recent_window']} exams and "
+        lines.append(f"Appeared in {f['recent_appearances']} of the last {_plural(f['recent_window'], 'paper')} and "
                      f"{f['appearances']} of {T} overall.")
         since = f.get("exams_since_last")
         if since == 1:
-            lines.append(f"Tested in the most recent exam ({f['last_label']}).")
+            lines.append(f"Tested in the most recent paper ({f['last_label']}).")
         elif since:
-            lines.append(f"Last appeared in {f['last_label']}, {since} exams ago.")
+            lines.append(f"Last appeared in {f['last_label']}, {_plural(since, 'paper')} ago.")
     if f.get("streak_present", 0) >= 2:
-        lines.append(f"Tested in each of the last {f['streak_present']} exams.")
+        lines.append(f"Tested in each of the last {f['streak_present']} papers.")
     if f.get("streak_absent", 0) >= 2 and f["appearances"]:
-        lines.append(f"Not tested in the last {f['streak_absent']} exams.")
+        lines.append(f"Not tested in the last {f['streak_absent']} papers.")
     gaps = f.get("gaps") or []
     if len(gaps) >= 2:
-        lines.append(f"Gaps between appearances: {', '.join(map(str, gaps))} exams (mean {np.mean(gaps):.1f}).")
+        lines.append(f"Gaps between appearances: {', '.join(map(str, gaps))} papers (mean {np.mean(gaps):.1f}).")
     rot = f.get("rotation")
     if rot and rot.get("significant"):
-        lines.append(f"Regular rotation detected: about every {rot['period']:.1f} exams (permutation test "
+        lines.append(f"Regular rotation detected: about every {rot['period']:.1f} papers (permutation test "
                      f"p = {rot['p_value']:.3f}).")
     if f.get("hazard_rate") is not None and f.get("hazard_opportunities", 0) >= 5:
         g = f["hazard_gap"]
-        when = "after appearing in the previous exam" if g == 1 else f"{g} exams after their last appearance"
+        when = "after appearing in the previous paper" if g == 1 else f"{g} papers after their last appearance"
         lines.append(f"In this course, topics reappeared {when} {_fmt_pct(f['hazard_rate'])} of the time "
                      f"({f['hazard_opportunities']} cases; average appearance rate {_fmt_pct(f['base_rate'])}).")
     if f.get("marks_mean") is not None:
+        # Per paper, with a question's marks shared between the topics it covers: not the marks of one question.
         rng = f"{f['marks_min']:g}-{f['marks_max']:g}" if f['marks_min'] != f['marks_max'] else f"{f['marks_mean']:g}"
-        lines.append(f"Typical marks when tested: {rng} (mean {f['marks_mean']:g}).")
+        lines.append(f"Marks on this topic per paper, with a question's marks shared between the topics it covers: "
+                     f"{rng} (mean {f['marks_mean']:g}).")
     if f.get("major_question_rate") is not None and f["appearances"]:
         lines.append(f"Tested as a major question (10% or more of the paper) in {_fmt_pct(f['major_question_rate'])} "
                      f"of appearances.")
     # Question formats are described once, by the topic's format guide (prediction/format_guide.py), so the
     # evidence lines do not repeat or contradict it.
     if f.get("exact_repeats"):
-        lines.append(f"{f['exact_repeats']} question(s) on this topic repeated an earlier question almost word for word.")
+        n = f["exact_repeats"]
+        lines.append(f"{_plural(n, 'question')} on this topic repeated an earlier question almost word for word.")
     if f.get("mapping_confidence") is not None:
         lines.append(f"Average syllabus match of its questions: {_fmt_pct(f['mapping_confidence'])}.")
     if location:
-        lines.append(f"Syllabus location: {location}.")
+        lines.append(f"{LOCATION_PREFIX}{location}.")
     return lines
 
 
@@ -375,19 +408,19 @@ def _why_not(pred: TopicPrediction, panel: Panel, haz, base_rate: float, mapping
     if T == 0:
         return out
     if f["appearances"] == 0 and f.get("is_lab"):
-        out.append(f"Laboratory or practical item: none of the {T} written papers asked about it.")
+        out.append(f"Laboratory or practical item: none of the {_plural(T, 'written paper')} asked about it.")
     elif f["appearances"] == 0:
-        out.append(f"No history: never appeared in the {T} supplied exams.")
+        out.append(f"No history: never appeared in the {_plural(T, 'supplied paper')}.")
     elif f["appearances"] <= max(1, round(0.2 * T)):
-        out.append(f"Rare historically: appeared in only {f['appearances']} of {T} exams.")
+        out.append(f"Rare historically: appeared in only {f['appearances']} of {T} papers.")
     if f.get("exams_since_last") == 1 and haz is not None and 1 in haz.counts:
         hits, opps = haz.counts[1]
         rate = hits / opps if opps else 0.0
         if opps >= 5 and rate < base_rate:
-            out.append(f"Recently repeated: it was in the last exam, and in this course topics reappear in the very "
-                       f"next exam only {_fmt_pct(rate)} of the time (average {_fmt_pct(base_rate)}).")
+            out.append(f"Recently repeated: it was in the last paper, and in this course topics reappear in the very "
+                       f"next paper only {_fmt_pct(rate)} of the time (average {_fmt_pct(base_rate)}).")
     if f.get("streak_absent", 0) >= 3 and f["appearances"]:
-        out.append(f"Absent from the last {f['streak_absent']} exams.")
+        out.append(f"Absent from the last {f['streak_absent']} papers.")
     mc = f.get("mapping_confidence")
     if mc is not None and mc < 0.55:
         out.append(f"Weak semantic evidence: its historical questions match the syllabus at only {_fmt_pct(mc)}.")

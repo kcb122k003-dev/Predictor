@@ -44,9 +44,8 @@ def priority_reason(*, category: str, rank: int, topics: int, stats: dict[str, A
         reasons.append("its past questions match the syllabus entry strongly")
     elif mc is not None and mc < 0.55:
         reasons.append("its past questions match the syllabus entry only weakly")
-    if guide and guide.get("basis") in ("history", "weak_history") and guide.get("papers"):
-        reasons.append(f"its most frequent format ({guide['display'].lower()}) appeared in {guide['papers']} of those "
-                       f"papers")
+    # The question format barely affects the rank, so it is not given as a reason for the priority (the format guide
+    # describes it separately).
     sec = stats.get("secondary_only_papers", 0)
     text = f"{head} because it " + _join(reasons) + "."
     if sec:

@@ -92,35 +92,78 @@ export function table(columns, rows, { onRowClick, rowClass } = {}) {
   return h("div", { class: "table-wrap" }, h("table", { class: "data" }, thead, tbody));
 }
 
+// Dialogs (modal, drawer) are announced as dialogs, take keyboard focus when they open, keep Tab and Shift+Tab
+// inside while they are the topmost dialog, and give focus back to the control that opened them when they close.
+const FOCUSABLE = "a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex='-1'])";
+let dialogSeq = 0;
+
+function topDialog() {
+  const all = document.querySelectorAll(".modal, .drawer");
+  return all[all.length - 1] || null;
+}
+
+function trapFocus(box) {
+  const opener = document.activeElement;
+  function onKey(e) {
+    if (e.key !== "Tab" || topDialog() !== box) return;
+    const items = [...box.querySelectorAll(FOCUSABLE)].filter(el => el.getClientRects().length);
+    if (!items.length) { e.preventDefault(); return; }
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (!box.contains(document.activeElement)) { e.preventDefault(); first.focus(); return; }
+    if (e.shiftKey && (document.activeElement === first || document.activeElement === box)) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  }
+  document.addEventListener("keydown", onKey);
+  return () => {
+    document.removeEventListener("keydown", onKey);
+    if (opener && opener !== document.body && opener.isConnected && typeof opener.focus === "function") opener.focus();
+  };
+}
+
+// The title and Close stay at the top; only the body scrolls.
 export function modal(title, body, { wide = false } = {}) {
+  const id = `dialog-title-${++dialogSeq}`;
   const backdrop = h("div", { class: "drawer-backdrop" });
-  const box = h("div", { class: "modal", style: wide ? { width: "min(1100px, 96vw)" } : {} },
-    h("button", { class: "close-x small", onclick: () => close() }, "Close"),
-    h("h2", {}, title), body);
-  function close() { backdrop.remove(); box.remove(); document.removeEventListener("keydown", onKey); }
-  function onKey(e) { if (e.key === "Escape") close(); }
+  const heading = h("h2", { id, tabindex: "-1" }, title);
+  const box = h("div", { class: "modal", role: "dialog", "aria-modal": "true", "aria-labelledby": id, style: wide ? { width: "min(1100px, 96vw)" } : {} },
+    h("div", { class: "modal-head" }, heading, h("button", { class: "small", onclick: () => close() }, "Close")),
+    h("div", { class: "modal-body" }, body));
+  let release = null;
+  function close() {
+    backdrop.remove(); box.remove(); document.removeEventListener("keydown", onKey);
+    if (release) { release(); release = null; }
+  }
+  function onKey(e) { if (e.key === "Escape" && !e.defaultPrevented && topDialog() === box) { e.preventDefault(); close(); } }
   backdrop.addEventListener("click", close);
   document.addEventListener("keydown", onKey);
   document.body.append(backdrop, box);
+  release = trapFocus(box);
+  heading.focus();
   return { close, box };
 }
 
 // Side drawer. It closes on Escape, on a backdrop click and when the route (hash) changes, because it lives
-// outside the page's main element.
-export function drawer(body, { wide = false, label = "Details" } = {}) {
+// outside the page's main element. Its top bar (actions and Close) stays visible while the drawer scrolls.
+export function drawer(body, { wide = false, label = "Details", actions = [] } = {}) {
   const backdrop = h("div", { class: "drawer-backdrop" });
-  const panel = h("div", { class: `drawer${wide ? " wide" : ""}`, role: "dialog", "aria-label": label },
-    h("button", { class: "close-x small", onclick: () => close() }, "Close"), body);
+  const panel = h("div", { class: `drawer${wide ? " wide" : ""}`, role: "dialog", "aria-modal": "true", "aria-label": label, tabindex: "-1" },
+    h("div", { class: "drawer-head" }, actions, h("span", { class: "spacer" }), h("button", { class: "small", onclick: () => close() }, "Close")),
+    body);
+  let release = null;
   function close() {
     backdrop.remove(); panel.remove();
     document.removeEventListener("keydown", onKey);
     window.removeEventListener("hashchange", close);
+    if (release) { release(); release = null; }
   }
-  function onKey(e) { if (e.key === "Escape" && !document.querySelector(".modal")) close(); }
+  function onKey(e) { if (e.key === "Escape" && !e.defaultPrevented && topDialog() === panel) { e.preventDefault(); close(); } }
   backdrop.addEventListener("click", close);
   document.addEventListener("keydown", onKey);
   window.addEventListener("hashchange", close);
   document.body.append(backdrop, panel);
+  release = trapFocus(panel);
+  panel.focus();
   return { close, panel };
 }
 

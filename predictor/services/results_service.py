@@ -21,17 +21,42 @@ def run_dict(run: AnalysisRun) -> dict[str, Any]:
             "finished_at": run.finished_at.isoformat() if run.finished_at else None, "summary": run.summary or {}}
 
 
+def _evidence(p: Prediction) -> tuple[list[str], dict[str, Any]]:
+    """(evidence lines, facts) with the current wording, rebuilt from the stored facts.
+
+    The lines are text built at analysis time; rebuilding them keeps runs made before a wording change consistent
+    with the rest of the panel. A run whose facts lack a field the wording needs keeps its stored lines.
+    """
+    from ..prediction.ranking import LOCATION_PREFIX, _evidence_summary, evidence_lines
+
+    stored = (p.evidence or {}).get("lines", [])
+    facts = dict((p.features or {}).get("facts", p.features or {}))
+    if p.layer != "topic" or "appearances" not in facts:
+        return stored, facts
+    strength = p.evidence_strength or "Minimal"
+    location = next((ln[len(LOCATION_PREFIX):].removesuffix(".") for ln in stored if ln.startswith(LOCATION_PREFIX)),
+                    None)
+    try:
+        lines = evidence_lines(facts, p.uncertainty or {}, (p.contributions or {}).get("values") or None, strength,
+                               location)
+    except (KeyError, TypeError, ValueError):
+        return stored, facts
+    facts["evidence_summary"] = _evidence_summary(facts, strength)
+    return lines, facts
+
+
 def prediction_dict(p: Prediction) -> dict[str, Any]:
+    evidence, facts = _evidence(p)
     return {"id": p.id, "layer": p.layer, "topic_id": p.topic_id, "key": p.item_key, "label": p.label,
             "rank": p.rank, "score": p.score, "probability": p.probability, "prob_low": p.prob_low,
             "prob_high": p.prob_high, "calibrated": p.calibrated, "category": p.category, "confidence": p.confidence,
-            "facts": (p.features or {}).get("facts", p.features or {}), "signals_for": (p.features or {}).get("signals_for", []),
+            "facts": facts, "signals_for": (p.features or {}).get("signals_for", []),
             "relative_score": (p.features or {}).get("relative_score"),
             "contributions": (p.contributions or {}).get("values", {}),
             "contribution_source": (p.contributions or {}).get("source", ""),
             "signal_contributions": ((p.features or {}).get("signal_contributions") or {}).get("values", {}),
             "signal_source": ((p.features or {}).get("signal_contributions") or {}).get("source", ""),
-            "evidence": (p.evidence or {}).get("lines", []), "why_not": p.why_not or [],
+            "evidence": evidence, "why_not": p.why_not or [],
             "evidence_strength": p.evidence_strength or "", "uncertainty": p.uncertainty or {},
             # Shared with the Syllabus Explorer: counts from the run's topic_history artifact, the question format
             # guide and the plain-language reason for the priority (absent on runs made before they existed).

@@ -13,16 +13,20 @@
 //                        "results out of date" banner (with Re-analyse now) at its own top.
 //     opts.onReanalysed() called when a re-analysis started from the panel's own banner finishes.
 //     opts.explorerLink  true to show an "Open in Syllabus Explorer" link (for use outside the explorer).
-//   kindTag(kind)          visible tag saying what a value is: fact | estimate | model | illustrative | inferred | weak.
+//   kindTag(kind)          visible tag saying what a value is: fact | estimate | model | input | illustrative | inferred |
+//                          weak.
 //   priorityWord(p)        "Very high" | "High" | "Moderate" | "Low" for a prediction (old runs: "Extremely High").
 //   priorityColor(p)       colour token for a prediction's priority (from CATEGORY_COLORS).
 //   likelihood(p)          { kind, text, note } likelihood wording; a probability only when calibrated.
 //   SEPARATE_NOTE          why calibrated topic probabilities do not add up to 100%.
-//   rankRangeText(p)       "Rank range: 20-24 of 25 (low uncertainty)", or "".
+//   rankRangeText(p, total) "Rank range: 20-24 of 25 (low uncertainty)", or "". total: number of ranked topics when p
+//                          does not carry it (overview predictions).
+//   formatSummary(fams, a, T) sentence naming the most common past format (or the tied formats), or "".
 //   renderFormatGuide(g, { alternatives = 2 })  element for prediction.format_guide.
 //   formatEvidenceTag(g)   kind tag for a format guide's evidence (established, weak or inferred).
 //   templateBlock(t)       "General template" block with each [placeholder] marked (format_guide.template).
-//   illustrativeBlock(il)  "Illustrative practice question" block (format_guide.illustrative).
+//   illustrativeBlock(il)  practice question block (format_guide.illustrative): a generated "Illustrative practice
+//                          question", or a real "Past exam question to practise" (basis past_values).
 //   freshnessBanner(freshness, { courseId, onDone, onStart })  stale-results banner with "Re-analyse now", or
 //                          null. The button runs the analysis itself (then onDone), or calls onStart() instead.
 //   openQuestionSource(questionId)   "View original" modal (PDF page image, or page text with the line marked).
@@ -38,6 +42,7 @@ const KINDS = {
   fact: ["Historical fact", "Counted directly from the past papers you supplied."],
   estimate: ["Statistical estimate", "Estimated from the past papers by a statistical model; it comes with a range."],
   model: ["Model ranking", "The topic's position among this course's topics. It is not a probability."],
+  input: ["Model input", "A value the model uses to rank the topics. It is not the topic's chance of appearing."],
   illustrative: ["Illustrative", "Generated practice material. It is not a real exam question."],
   inferred: ["Inferred", "Not observed in your papers or documents; inferred from the syllabus or course patterns."],
   weak: ["Weak evidence", "Observed, but too few times to establish a pattern."],
@@ -80,21 +85,47 @@ export function likelihood(p) {
   }
   const parts = [`Relative priority: ${priorityWord(p)}`];
   if (p.relative_score !== null && p.relative_score !== undefined) {
-    parts.push(`Prediction score ${num(p.relative_score, 2)} (position among this course's topics; not a probability)`);
+    parts.push(`Relative score ${num(p.relative_score, 2)} (position among this course's topics; not a probability)`);
   }
   if (p.confidence) parts.push(`Confidence: ${p.confidence}`);
   return { kind: "model", text: parts.join(" · "), note: "" };
 }
 
-export function rankRangeText(p) {
+export function rankRangeText(p, total = null) {
   if (!p) return "";
   const u = p.uncertainty && typeof p.uncertainty === "object" ? p.uncertainty
     : { rank_low: p.rank_low, rank_high: p.rank_high, level: p.uncertainty };
   if (!u.rank_low) return "";
-  const of = u.topics ? ` of ${u.topics}` : "";
+  const n = u.topics || total;
+  const of = n ? ` of ${n}` : "";
   const level = u.level ? ` (${String(u.level).toLowerCase()} uncertainty)` : "";
   const range = u.rank_low === u.rank_high ? `${u.rank_low}` : `${u.rank_low}-${u.rank_high}`;
   return `Rank range: ${range}${of}${level}`;
+}
+
+// "(5 of the 10 papers containing this item)", without "1 of the 1 papers".
+function ofContaining(p, a, what = "this item") {
+  if (a <= 1) return `the only paper containing ${what}`;
+  if (p === a) return `all ${a} papers containing ${what}`;
+  return `${p} of the ${a} papers containing ${what}`;
+}
+
+// The most common past format, or the formats tied for it, from node stats.families (sorted by papers). A format seen
+// in one paper only is "seen once", never "most common".
+export function formatSummary(fams, a, T, what = "this item") {
+  if (!fams || !fams.length) return "";
+  const max = fams[0].papers;
+  const tops = fams.filter(f => f.papers === max);
+  const names = joinWords(tops.map(f => f.display));
+  if (max <= 1) {
+    return tops.length > 1 ? `Formats seen once: ${names} (1 paper each).` : `Format seen once: ${names} (1 of ${T} usable papers).`;
+  }
+  if (tops.length > 1) return `Equally common formats: ${names}, each in ${max} of ${T} usable papers (${ofContaining(max, a, what)}).`;
+  return `Most common format: ${names}, in ${max} of ${T} usable papers (${ofContaining(max, a, what)}).`;
+}
+
+function joinWords(items) {
+  return items.length <= 1 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
 }
 
 export function syllabusOrder(nodes, roots) {
@@ -116,6 +147,7 @@ export function syllabusOrder(nodes, roots) {
 }
 
 const marksText = (v) => (v === null || v === undefined ? "" : String(Number.isInteger(v) ? v : +Number(v).toFixed(1)));
+const marksRange = (lo, hi) => (lo === hi ? marksText(lo) : `${marksText(lo)}-${marksText(hi)}`);
 const plural = (n, word, many = `${word}s`) => `${n} ${n === 1 ? word : many}`;
 const squash = (s) => String(s || "").replace(/\s+/g, " ").trim();
 const letters = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
@@ -151,13 +183,23 @@ export function renderNodePanel(container, data, opts = {}) {
   c.T = c.stats ? c.stats.usable_papers : ((data.run || {}).usable_papers || 0);
   const root = h("div", { class: "ex-panel" });
   const top = h("div");
-  c.changed = async () => {
-    if (opts.onChanged) { opts.onChanged(); return; }
-    try {
-      const fr = await api.get(`/api/courses/${c.courseId}/freshness`);
-      clear(top);
-      append(top, freshnessBanner(fr, { courseId: c.courseId, onDone: opts.onReanalysed }));
-    } catch (e) { toast(e.message, "error"); }
+  // After a mapping is corrected or reset: reload this item so the question shows the saved correction (it counts
+  // from the next analysis), then show the out-of-date banner.
+  c.changed = async (qid) => {
+    let fresh = null;
+    try { fresh = await api.get(`/api/courses/${c.courseId}/explorer/nodes/${c.node.id}`); } catch (e) { toast(e.message, "error"); }
+    if (!root.isConnected) return;
+    const panel = fresh ? renderNodePanel(container, fresh, opts) : null;
+    if (opts.onChanged) opts.onChanged();
+    else {
+      try {
+        const fr = await api.get(`/api/courses/${c.courseId}/freshness`);
+        const holder = panel ? panel.top : top;
+        clear(holder);
+        append(holder, freshnessBanner(fr, { courseId: c.courseId, onDone: opts.onReanalysed }));
+      } catch (e) { toast(e.message, "error"); }
+    }
+    if (panel && qid) panel.showQuestion(qid, { quiet: true });
   };
   clear(container);
   append(container, root);
@@ -170,7 +212,7 @@ export function renderNodePanel(container, data, opts = {}) {
   if (!data.history_available) {
     append(root, h("div", { class: "banner info" }, data.message || "Counts appear after you run Analyze & Predict."),
       sourceSection(c));
-    return { showPaper: () => {}, showQuestion: () => {} };
+    return { showPaper: () => {}, showQuestion: () => {}, top };
   }
   append(root, timelineSection(c), countsSection(c), formatsSection(c), questionsSection(c));
   if (c.p && c.p.format_guide) {
@@ -178,7 +220,7 @@ export function renderNodePanel(container, data, opts = {}) {
       h("p", { class: "help" }, "This guide describes the general form of a question. The real past questions are listed under Past questions above.")));
   }
   append(root, sourceSection(c));
-  return { showPaper: (i) => c.showPaper(i), showQuestion: (id) => c.showQuestion(id) };
+  return { showPaper: (i) => c.showPaper(i), showQuestion: (id, o) => c.showQuestion(id, o), top };
 }
 
 // A. Overview ---------------------------------------------------------
@@ -206,8 +248,9 @@ function overviewSection(c) {
       h("span", { class: "help" }, n.inferred_reason || "The name was inferred.")) : null,
     n.is_lab ? badge("lab or practical") : null,
     n.excluded ? badge("excluded from predictions", "bad") : null,
-    (n.kinds || []).filter(k => k !== "lab").map(k => badge(k)),
-    n.hours ? h("span", { class: "help" }, `${marksText(n.hours)} teaching hours`) : null));
+    (n.kinds || []).filter(k => k !== "lab").length ? h("span", { class: "help", title: "Read from the wording of the syllabus entry" },
+      `Syllabus wording suggests: ${n.kinds.filter(k => k !== "lab").join(", ")}`) : null,
+    n.hours && !/\bhours?\b/i.test(original) ? h("span", { class: "help" }, `${marksText(n.hours)} teaching hours`) : null));
 
   if (!s) return out;
   const a = s.exam_frequency;
@@ -217,9 +260,7 @@ function overviewSection(c) {
     tile("fact", "Questions", String(s.question_frequency),
       s.secondary_questions > 0 ? `${s.secondary_questions} as secondary topic` : null),
     tile("fact", "Last appeared", s.last_label || "Not in the supplied papers", null),
-    tile("fact", "Typical marks", s.marks && s.marks.known
-      ? (s.marks.min === s.marks.max ? marksText(s.marks.min) : `${marksText(s.marks.min)}-${marksText(s.marks.max)}`) : "Not known",
-    s.marks && s.marks.known ? `median ${marksText(s.marks.median)}, ${s.marks.known} with marks known` : null),
+    marksTile(c),
   ];
   if (p) {
     const word = priorityWord(p);
@@ -256,6 +297,24 @@ function overviewSection(c) {
   return out;
 }
 
+// Typical marks: the marks of the questions whose main topic this is. A question that only touches it as a secondary
+// topic carries marks for its main topic too, so those are shown separately (never as this item's typical marks).
+function marksTile(c) {
+  const m = c.stats.marks || {};
+  if (m.known) {
+    return tile("fact", "Typical marks", marksRange(m.min, m.max),
+      `median ${marksText(m.median)}; ${plural(m.known, "question")} with this as the main topic`);
+  }
+  const sec = c.questions.filter(q => q.role === "secondary" && q.marks !== null && q.marks !== undefined).map(q => Number(q.marks));
+  if (!c.stats.primary_questions && sec.length) {
+    const range = marksRange(Math.min(...sec), Math.max(...sec));
+    return tile("fact", "Typical marks", "No main-topic question", sec.length === 1
+      ? `Asked only as a secondary topic: that question carried ${range} marks in all, shared with its main topic.`
+      : `Asked only as a secondary topic: those ${sec.length} questions carried ${range} marks each in all, shared with their main topics.`);
+  }
+  return tile("fact", "Typical marks", "Not known", c.stats.question_frequency ? "No marks were found for its questions." : null);
+}
+
 // The model's own explanation of the ranking, collapsed: evidence lines, component shares, the Bayesian
 // recurrence estimate, the temporal pattern, the closest past questions and the logistic signal contributions.
 function modelDetails(p) {
@@ -276,15 +335,16 @@ function modelDetails(p) {
     shares.length ? [h("h4", {}, "Model contributions"),
       h("p", { class: "help" }, `Each component's share of the final score: ${p.contribution_source}. The shares add up to the topic's score.`),
       shares.map(([k, v]) => shareBar(k, v, maxShare, v.toFixed(3)))] : null,
-    b ? [h("h4", {}, "Bayesian recurrence ", kindTag("estimate")),
+    b ? [h("h4", {}, "Historical recurrence rate ", kindTag("input")),
+      h("p", { class: "help" }, "How often this topic came up in the past papers, smoothed by a Bayesian model. It is one input to ",
+        "the ranking, not the topic's chance of appearing: that is the Likelihood shown above."),
       h("dl", { class: "facts" },
-        h("dt", {}, "Chance of appearing"), h("dd", {}, `${pct(b.posterior_mean)} (median ${pct(b.posterior_median)})`),
+        h("dt", {}, "Recurrence rate"), h("dd", {}, `${pct(b.posterior_mean)} (median ${pct(b.posterior_median)})`),
         h("dt", {}, `${Math.round(100 * b.interval_level)}% credible interval`), h("dd", {}, `${pct(b.credible_interval[0])} to ${pct(b.credible_interval[1])}`),
-        h("dt", {}, "Observed"), h("dd", {}, `${b.observed.appearances} of ${b.observed.exams} paper(s)`),
+        h("dt", {}, "Observed"), h("dd", {}, `${b.observed.appearances} of ${plural(b.observed.exams, "paper")}`),
         h("dt", {}, "From the prior"), h("dd", {}, `${pct(b.prior_contribution)} (unit and course rate; shrinks as papers accumulate)`),
         h("dt", {}, "Effective sample size"), h("dd", {}, num(b.effective_sample_size, 1)),
-        h("dt", {}, "Recency discount"), h("dd", {}, b.half_life ? `half-life ${b.half_life} papers` : "none")),
-      h("p", { class: "help" }, "This rate is one input to the ranking. It is not the topic's final likelihood.")] : null,
+        h("dt", {}, "Recency discount"), h("dd", {}, b.half_life ? `half-life ${b.half_life} papers` : "none"))] : null,
     f.temporal_mode ? [h("h4", {}, "Temporal pattern"),
       h("p", {}, `Used: ${f.temporal_mode}.`, f.temporal_log_bayes_factor !== undefined && f.temporal_log_bayes_factor !== null
         ? ` Gap hazard vs constant rate on earlier papers: log Bayes factor ${num(f.temporal_log_bayes_factor, 2)} (positive favours the hazard).` : "")] : null,
@@ -321,10 +381,10 @@ function groupBlock(c) {
       const st = k.stats || {};
       const tr = h("tr", { class: "clickable", onclick: () => c.navigate(k.id) },
         h("td", {}, h("button", { class: "ex-link", onclick: (e) => { e.stopPropagation(); c.navigate(k.id); } }, nodeLabel(k))),
-        h("td", { class: "num" }, st.usable_papers !== undefined ? `${st.exam_frequency}/${st.usable_papers}` : ""),
-        h("td", { class: "num" }, st.question_frequency ?? ""),
-        h("td", {}, st.last_label || (st.usable_papers !== undefined ? "Not in the supplied papers" : "")),
-        h("td", {}, priorityChip(prio(k.id))));
+        h("td", { class: "num", "data-label": "Papers" }, st.usable_papers !== undefined ? `${st.exam_frequency}/${st.usable_papers}` : ""),
+        h("td", { class: "num", "data-label": "Questions" }, st.question_frequency ?? ""),
+        h("td", { "data-label": "Last appeared" }, st.last_label || (st.usable_papers !== undefined ? "Not in the supplied papers" : "")),
+        h("td", prio(k.id) ? { "data-label": "Priority" } : {}, priorityChip(prio(k.id))));
       return tr;
     });
     append(box, h("h4", { style: { marginTop: "12px" } }, "Items in this group"),
@@ -340,6 +400,14 @@ function groupBlock(c) {
 function timelineSection(c) {
   const tl = c.data.timeline || [];
   const qById = new Map(c.questions.map(q => [q.id, q]));
+  const famOrder = (c.stats.families || []).map(f => f.family);
+  const famName = new Map((c.stats.families || []).map(f => [f.family, f.display]));
+  const formatsOf = (qs) => {
+    const fams = new Set(qs.flatMap(q => q.families || []));
+    const out = [...fams].sort((x, y) => famOrder.indexOf(x) - famOrder.indexOf(y)).map(f => famName.get(f) || f);
+    if (qs.some(q => !(q.families || []).length)) out.push("Not classified");
+    return out;
+  };
   const rows = tl.map(t => {
     const label = t.label || String(t.year || "");
     if (t.kind === "missing") {
@@ -357,7 +425,7 @@ function timelineSection(c) {
       h("td", {}, t.appeared ? badge("Yes", "ok") : badge("No")),
       h("td", {}, qs.length ? qs.map(q => `${q.question || "?"}${q.role === "secondary" ? " (secondary)" : ""}`).join(", ")
         : (t.questions || []).length ? String(t.questions.length) : ""),
-      h("td", {}, (t.formats || []).join(", ")));
+      h("td", {}, qs.length ? formatsOf(qs).join(", ") : (t.formats || []).join(", ")));
   });
   const missing = tl.filter(t => t.kind === "missing").map(t => t.label || t.year);
   const excluded = c.data.excluded_papers || [];
@@ -386,7 +454,7 @@ function countsSection(c) {
       box("Question frequency", plural(s.question_frequency, "question"),
         `${s.primary_questions} primary, ${s.secondary_questions} secondary`,
         h("p", { class: "help" }, "Primary: it is the question's main topic. Secondary: the question also covers it.")),
-      box("Repetition", `${(r.exact || 0) + (r.paraphrase || 0)} repeated`, "Each question compared with the earlier papers:",
+      box("Repetition", `${(r.exact || 0) + (r.paraphrase || 0)} of ${plural(s.question_frequency, "question")} repeated`, "Each question compared with the earlier papers:",
         h("ul", { class: "ex-replist" },
           h("li", {}, h("strong", {}, plural(r.exact || 0, "exact or near-exact repeat")), ": almost the same words as an earlier question"),
           h("li", {}, h("strong", {}, plural(r.paraphrase || 0, "paraphrase")), ": the same question in other words"),
@@ -397,22 +465,28 @@ function countsSection(c) {
 }
 
 // D. Question formats ----------------------------------------------------
+// Format families (what a student prepares for) everywhere: this table, the timeline, the question items, the
+// format guide and the Predictions cards use the same names and counts.
 function formatsSection(c) {
   const s = c.stats;
-  const labels = s.labels || [];
   const fams = s.families || [];
-  if (!labels.length && !fams.length) {
+  const loose = c.questions.filter(q => !(q.families || []).length);
+  if (!fams.length && !loose.length) {
     return section("Question formats", h("p", { class: "muted" }, "No past questions, so no format has been observed for this item."));
   }
-  const top = fams[0];
+  const rows = fams.map(f => [f.display, f.questions, f.papers]);
+  if (loose.length) rows.push(["Not classified", loose.length, new Set(loose.map(q => q.paper_index)).size]);
+  const overlap = c.questions.some(q => (q.families || []).length > 1);
+  const summary = formatSummary(fams, s.exam_frequency, c.T);
+  const max = fams.length ? fams[0].papers : 0;
+  const others = fams.filter(f => f.papers !== max);
   return section(["Question formats ", kindTag("fact")],
-    labels.length ? h("div", { class: "table-wrap" }, h("table", { class: "data" },
+    h("div", { class: "table-wrap" }, h("table", { class: "data" },
       h("thead", {}, h("tr", {}, h("th", {}, "Format"), h("th", { class: "num" }, "Questions"), h("th", { class: "num" }, "Papers containing it"))),
-      h("tbody", {}, labels.map(l => h("tr", {}, h("td", {}, l.display), h("td", { class: "num" }, l.questions), h("td", { class: "num" }, l.papers)))))) : null,
-    s.multi_label_questions > 0 ? h("p", { class: "help" }, "A question can have several formats, so these counts overlap.") : null,
-    top ? h("p", { style: { marginTop: "8px" } }, h("strong", {}, `Most common format: ${top.display}`),
-      `, observed in ${top.papers} of ${c.T} usable papers (${top.papers} of the ${s.exam_frequency} papers containing this item).`) : null,
-    fams.length > 1 ? h("p", {}, "Other observed formats: ", fams.slice(1).map(f => `${f.display} (${plural(f.papers, "paper")})`).join(", "), ".") : null,
+      h("tbody", {}, rows.map(([d, q, p]) => h("tr", {}, h("td", {}, d), h("td", { class: "num" }, q), h("td", { class: "num" }, p)))))),
+    overlap ? h("p", { class: "help" }, "A question can combine formats (for example a derivation with a sketch), so these counts overlap.") : null,
+    summary ? h("p", { style: { marginTop: "8px" } }, h("strong", {}, summary)) : null,
+    max > 1 && others.length ? h("p", {}, "Other observed formats: ", others.map(f => `${f.display} (${plural(f.papers, "paper")})`).join(", "), ".") : null,
     h("p", { class: "help" }, "The most frequent past format is not certain to appear next time."));
 }
 
@@ -434,21 +508,23 @@ function questionsSection(c) {
     const unc = c.data.uncounted || [];
     if (unc.length) {
       append(box, h("details", { class: "ex-more" },
-        h("summary", {}, `Possible matches not counted (uncertain mapping) (${unc.length})`),
+        h("summary", {}, `Possible matches not counted, uncertain mapping (${unc.length})`),
         h("p", { class: "help" }, "These questions might belong here, but the match was too uncertain to count. Correct the mapping if you know where they belong."),
-        unc.map(u => h("div", { class: "ex-q" },
-          h("div", { class: "ex-qhead" }, h("strong", {}, u.paper), u.question ? h("span", { class: "mono" }, `Q ${u.question}`) : null, u.status ? statusBadge(u.status) : null),
+        unc.map(u => h("div", { class: "ex-q", "data-qid": u.id },
+          h("div", { class: "ex-qhead" }, h("strong", {}, u.paper), u.question ? h("span", { class: "mono" }, `Q ${u.question}`) : null, u.status ? statusBadge(u.status) : null,
+            mappingBadge(u)),
           h("div", { class: "ex-qtext" }, u.text || "(text not available)"),
           (u.matches || []).length ? h("div", { class: "help" }, "Possible topics: ",
-            u.matches.map(m => `${m.label} (${m.status}, score ${num(m.score, 2)})`).join("; ")) : null,
+            u.matches.map(m => `${m.label} (status ${m.status}, match score ${num(m.score, 2)})`).join("; ")) : null,
+          pendingLine(u),
           h("div", { class: "ex-actions" },
             u.text ? h("button", { class: "small", onclick: () => openQuestionSource(u.id) }, "View original") : null,
-            h("button", { class: "small", onclick: () => correct(c, { id: u.id, paper: u.paper, question: u.question, text: u.text, manual: false }) }, "Correct mapping"))))));
+            h("button", { class: "small", onclick: () => correct(c, { ...u, manual: !!u.manual }) }, "Correct mapping"))))));
     }
     const rel = c.data.related || [];
     if (rel.length) {
       append(box, h("details", { class: "ex-more" },
-        h("summary", {}, `Related questions mapped to other topics (not counted) (${rel.length})`),
+        h("summary", {}, `Related questions mapped to other topics, not counted (${rel.length})`),
         h("p", { class: "help" }, "Past questions closest in meaning to this item. They are counted for the topic they are mapped to, not here."),
         rel.map(r => h("div", { class: "ex-q" },
           h("div", { class: "ex-qhead" }, h("strong", {}, r.exam), h("span", { class: "help" }, `similarity ${num(r.similarity, 2)}`)),
@@ -461,11 +537,14 @@ function questionsSection(c) {
     render();
     box.scrollIntoView({ behavior: "smooth", block: "start" });
   };
-  c.showQuestion = (qid) => {
+  // quiet: only scroll to the question when it is listed here (after a mapping change), never open its source.
+  c.showQuestion = (qid, { quiet = false } = {}) => {
     if (c.paperFilter !== null) { c.paperFilter = null; render(); }
     const el = box.querySelector(`[data-qid="${qid}"]`);
-    if (!el) { openQuestionSource(qid); return; }
-    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (!el) { if (!quiet) openQuestionSource(qid); return; }
+    const fold = el.closest("details");
+    if (fold) fold.open = true;
+    el.scrollIntoView({ behavior: quiet ? "auto" : "smooth", block: "center" });
     el.classList.add("flash");
     setTimeout(() => el.classList.remove("flash"), 1600);
   };
@@ -473,44 +552,84 @@ function questionsSection(c) {
   return box;
 }
 
+// The format families of a question, named as in section D (stats.families), or the plain family key.
+function familyNames(c, q) {
+  const names = new Map((c.stats.families || []).map(f => [f.family, f.display]));
+  return (q.families || []).map(f => names.get(f) || f.replace(/_/g, " "));
+}
+
+// "set by you" for a correction the analysis used; "your correction" for one saved (or removed) since then.
+function mappingBadge(q) {
+  if (q.pending) return badge(q.manual_now ? "your correction, not yet counted" : "correction removed, not yet counted", "warn");
+  return (q.manual_now ?? q.manual) ? badge("set by you", "warn") : null;
+}
+
+function pendingLine(q) {
+  if (!q.pending) return null;
+  if (!q.manual_now) {
+    return h("div", { class: "ex-pending" }, "You removed your correction. The automatic mapping is used from the next analysis.");
+  }
+  const mm = q.manual_mapping || { topics: [], status: "" };
+  const prim = mm.topics.filter(t => t.role === "primary").map(t => t.label);
+  const sec = mm.topics.filter(t => t.role !== "primary").map(t => t.label);
+  const what = !mm.topics.length ? "outside the syllabus (no topic)"
+    : `primary topic ${prim.join(", ") || "none"}${sec.length ? `; secondary ${sec.join(", ")}` : ""}; status ${mm.status}`;
+  return h("div", { class: "ex-pending" }, `Your correction: ${what}. It counts from the next analysis; the counts on this page are still from the last one.`);
+}
+
 function questionItem(c, q) {
   const raw = !q.missing && q.raw_text && squash(q.raw_text) !== squash(q.text);
   const earlier = q.earlier || [];
+  const fams = familyNames(c, q);
+  const group = Array.isArray(q.topics);
   return h("article", { class: "ex-q", "data-qid": q.id },
     h("div", { class: "ex-qhead" },
       h("strong", {}, q.paper), q.question ? h("span", { class: "mono" }, `Q ${q.question}`) : null,
       q.marks !== null && q.marks !== undefined ? h("span", { class: "muted" }, `${marksText(q.marks)} marks`) : null,
-      badge(q.role === "secondary" ? "secondary topic" : "primary topic", q.role === "secondary" ? "" : "info"),
+      group ? null : badge(q.role === "secondary" ? "secondary topic" : "primary topic", q.role === "secondary" ? "" : "info"),
       q.status ? statusBadge(q.status) : null,
       q.confidence !== null && q.confidence !== undefined ? h("span", { class: "help", title: "How strongly the question matches this syllabus item" }, `match ${pct(q.confidence)}`) : null,
-      q.manual ? badge("set by you", "warn") : null,
+      mappingBadge(q),
       q.is_optional ? h("span", { class: "help" }, "choice question") : null),
-    (q.labels || []).length ? h("div", { class: "ex-tags", style: { margin: "4px 0 0" } }, q.labels.map(l => badge(l))) : null,
+    fams.length ? h("div", { class: "ex-tags", style: { margin: "4px 0 0" } }, fams.map(f => badge(f)),
+      (q.labels || []).length ? h("span", { class: "help" }, `Wording: ${q.labels.join(", ")}`) : null) : null,
     q.missing ? h("p", { class: "muted" }, "The text of this question is no longer stored (the paper may have been processed again). Re-analyse to refresh.")
       : h("blockquote", { class: "ex-qtext" }, q.text),
     raw ? h("details", {}, h("summary", { class: "help" }, "As extracted"), h("pre", { class: "pagetext" }, q.raw_text)) : null,
     h("div", { class: "ex-qmeta" },
+      group && q.topics.length ? h("div", {}, "Topic in this unit: ",
+        q.topics.map((t, i) => [i ? ", " : "", h("button", { class: "ex-link", onclick: () => c.navigate(t.id) }, t.label), ` (${t.role})`])) : null,
       q.relation_text ? h("div", {}, q.relation_text, earlier.length ? ": " : "",
-        earlier.map((e, i) => [i ? ", " : "", h("button", { class: "ex-link", onclick: () => c.showQuestion(e.id) }, `${e.paper} ${e.question || ""}`.trim())])) : null,
+        earlier.map((e, i) => [i ? ", " : "", h("button", { class: "ex-link", onclick: () => c.showQuestion(e.id) }, `${e.paper || ""} ${e.question || ""}`.trim() || "earlier question")])) : null,
       (q.other_topics || []).length ? h("div", {}, "Also mapped to: ",
         q.other_topics.map((t, i) => [i ? ", " : "", h("button", { class: "ex-link", onclick: () => c.navigate(t.id) }, t.label), ` (${t.role})`])) : null,
       q.file ? h("div", {}, `Source: ${where(q.file, q.page, null)}`) : null,
       (q.provisional || []).length ? h("div", {}, h("span", { class: "badge warn" }, "Provisional"), " ", q.provisional.join("; ")) : null),
+    pendingLine(q),
     h("div", { class: "ex-actions" },
       q.missing ? null : h("button", { class: "small", onclick: () => openQuestionSource(q.id) }, "View original"),
       h("button", { class: "small", onclick: () => correct(c, q) }, "Correct mapping")));
 }
 
+// The modal starts from the question's current mapping: a correction saved since the analysis, else the mapping
+// the analysis used (for a unit, the topics the question was counted for).
 function correct(c, q) {
   const n = c.node;
-  const preset = { primary: null, secondary: [] };
-  if (n.level !== "group" && q.role) {
-    const others = q.other_topics || [];
-    if (q.role === "primary") preset.primary = n.id;
-    else { preset.secondary.push(n.id); const prim = others.find(t => t.role === "primary"); if (prim) preset.primary = prim.id; }
-    for (const t of others) if (t.role === "secondary" && t.id !== preset.primary) preset.secondary.push(t.id);
+  const preset = { primary: null, secondary: [], outside: false };
+  const live = q.manual_now && q.manual_mapping;
+  if (live) {
+    for (const t of live.topics) { if (t.role === "primary" && !preset.primary) preset.primary = t.id; else preset.secondary.push(t.id); }
+    preset.outside = !live.topics.length;
+    preset.status = live.status;
+  } else if (Array.isArray(q.topics) || Array.isArray(q.other_topics)) {
+    const here = Array.isArray(q.topics) ? q.topics
+      : (n.level !== "group" && q.role ? [{ id: n.id, role: q.role }] : []);
+    const all = [...here, ...(q.other_topics || [])];
+    const prim = all.find(t => t.role === "primary");
+    if (prim) preset.primary = prim.id;
+    for (const t of all) if (t.role !== "primary" && t.id !== preset.primary && !preset.secondary.includes(t.id)) preset.secondary.push(t.id);
   }
-  openMappingModal(q, { courseId: c.courseId, nodes: c.nodes, preset, onSaved: c.changed });
+  openMappingModal({ ...q, manual: !!(q.manual_now ?? q.manual) }, { courseId: c.courseId, nodes: c.nodes, preset, onSaved: () => c.changed(q.id) });
 }
 
 // F. Format guide ---------------------------------------------------------
@@ -530,13 +649,25 @@ export function templateBlock(t) {
 
 export function illustrativeBlock(il) {
   const src = il.source;
+  if (il.basis === "past_values") {
+    // A real past question shown word for word (its values are known to give a solvable problem): it is a
+    // historical fact, never labelled as generated.
+    const where = src ? [src.exam, src.question].filter(Boolean).join(" ") : "";
+    return h("div", { class: "ex-illustrative ex-pastq" },
+      h("div", { class: "ex-block-label" }, `Past exam question to practise${where ? ` (${where})` : ""}`, kindTag("fact")),
+      h("p", { class: "ex-illustrative-text" }, il.text),
+      h("p", { class: "help" }, `This is ${src ? `${src.exam} question ${src.question}` : "a real past question"}, word for word. `,
+        "A new paper will ask a similar question with other values. The app does not invent new values, because it cannot check that they give a solvable problem."));
+  }
+  const known = (v) => v !== null && v !== undefined;
+  const range = known(il.marks_low) ? marksRange(il.marks_low, il.marks_high) : "";
+  const marks = !range ? null : il.marks_basis === "topic" ? `Marks in this topic's past questions of this kind: ${range}.`
+    : il.marks_basis === "course" ? `Marks for questions of this kind across the whole course (not specific to this topic): ${range}.`
+      : `Typical marks for questions of this kind: ${range}.`;
   return h("div", { class: "ex-illustrative" },
     h("div", { class: "ex-block-label" }, "Illustrative practice question - not a real exam question", kindTag("illustrative")),
     h("p", { class: "ex-illustrative-text" }, il.text),
-    il.basis === "past_values" && src && !String(il.note || "").includes(src.exam)
-      ? h("p", { class: "help" }, `The values come from ${src.exam} question ${src.question}, a real past paper.`) : null,
-    il.marks_low !== null && il.marks_low !== undefined ? h("p", { class: "help" },
-      `Marks in similar past questions: ${il.marks_low === il.marks_high ? marksText(il.marks_low) : `${marksText(il.marks_low)}-${marksText(il.marks_high)}`}.`) : null,
+    marks ? h("p", { class: "help" }, marks) : null,
     il.note ? h("p", { class: "help" }, il.note) : null);
 }
 
@@ -588,22 +719,37 @@ function sourceSection(c) {
 }
 
 // ------------------------------------------------------------------ source modals
-// fraction: where the passage roughly sits on the page (line / lines), used to scroll it into view.
+// The page image comes with the highlight's position (X-Highlight-Top/Bottom, fractions of the page height), so the
+// modal can centre the highlight; without it, ``fraction`` (line / lines of the extracted page text) is a rough guess.
 function pageImage(fileId, page, highlight, fallback, fraction = null) {
   const url = `/api/files/${fileId}/pages/${page}/image?highlight=${encodeURIComponent(highlight || "")}`;
   const holder = h("div", { class: "ex-page" });
-  const img = h("img", { class: "ex-page-img", src: url, alt: `Page ${page} with the passage highlighted` });
-  img.addEventListener("load", () => {
-    const box = img.closest(".modal, .drawer");
-    if (!box || fraction === null || fraction < 0.3) return;
-    const top = img.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop;
-    box.scrollTop = Math.max(0, top + fraction * img.clientHeight - box.clientHeight / 2);
-  });
-  img.addEventListener("error", () => {
+  const img = h("img", { class: "ex-page-img", alt: `Page ${page} with the passage highlighted` });
+  let box = null;
+  const failed = () => {
     clear(holder);
     append(holder, h("p", { class: "help" }, "The page image could not be made; showing the extracted text instead."), fallback());
+  };
+  img.addEventListener("load", () => {
+    const scroller = img.closest(".modal-body, .drawer");
+    if (!scroller) return;
+    let at = null;
+    if (box) at = (box[0] + box[1]) / 2;
+    else if (fraction !== null && fraction >= 0.3) at = fraction;
+    if (at === null) return;
+    const top = img.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+    scroller.scrollTop = Math.max(0, top + at * img.clientHeight - scroller.clientHeight / 2);
   });
-  holder.appendChild(img);
+  img.addEventListener("error", failed);
+  fetch(url).then(async (r) => {
+    if (!r.ok) { failed(); return; }
+    const t = parseFloat(r.headers.get("X-Highlight-Top"));
+    const b = parseFloat(r.headers.get("X-Highlight-Bottom"));
+    if (Number.isFinite(t) && Number.isFinite(b)) box = [t, b];
+    img.src = URL.createObjectURL(await r.blob());
+  }).catch(failed);
+  append(holder, img, h("p", { class: "help", style: { marginTop: "6px" } },
+    h("a", { href: url, target: "_blank", rel: "noopener" }, "Open the page full size"), " (in a new tab, to zoom in)."));
   return holder;
 }
 
@@ -632,7 +778,8 @@ export async function openQuestionSource(qid) {
     : h("pre", { class: "pagetext" }, s.raw_text || s.text || ""));
   const lineCount = s.page_text ? s.page_text.split("\n").length : 0;
   const fraction = lineCount && s.line ? s.line / lineCount : null;
-  const view = s.is_pdf && s.file_id && s.page ? pageImage(s.file_id, s.page, (s.text || "").slice(0, 60), fallback, fraction) : fallback();
+  // The whole question is sent: the page image highlights every line of it, not only its opening words.
+  const view = s.is_pdf && s.file_id && s.page ? pageImage(s.file_id, s.page, (s.text || "").slice(0, 400), fallback, fraction) : fallback();
   modal(`${s.exam || "Past paper"}, question ${s.question || ""}`.trim(), h("div", {},
     h("p", { class: "help" }, where(s.file, s.page, s.line), s.is_pdf ? ". The question is highlighted on the page." : ". The question's line is highlighted."),
     view,
@@ -671,7 +818,7 @@ export async function openMappingModal(q, { courseId, nodes, preset = {}, onSave
     return out.join(" › ");
   };
   const state = { primary: preset.primary && byId.has(preset.primary) ? preset.primary : null,
-    secondary: new Set((preset.secondary || []).filter(id => byId.has(id) && id !== preset.primary)), outside: false };
+    secondary: new Set((preset.secondary || []).filter(id => byId.has(id) && id !== preset.primary)), outside: !!preset.outside };
   // The current topics are listed first so they are visible when the modal opens.
   const current = new Set([state.primary, ...state.secondary].filter(Boolean));
   const ordered = syllabusOrder(nodes);
@@ -682,8 +829,9 @@ export async function openMappingModal(q, { courseId, nodes, preset = {}, onSave
   const search = h("input", { type: "search", placeholder: "Search topics by number or name", "aria-label": "Search topics", style: { width: "100%" } });
   const list = h("div", { class: "ex-pick", role: "group", "aria-label": "Topics" });
   const summary = h("p", { class: "help", "aria-live": "polite" });
-  const outside = h("input", { type: "checkbox" });
-  const status = h("select", {}, h("option", { value: "A" }, "A: clearly in the syllabus"), h("option", { value: "B" }, "B: probably in the syllabus"));
+  const outside = h("input", { type: "checkbox", checked: state.outside });
+  const status = h("select", { disabled: state.outside }, h("option", { value: "A" }, "A: clearly in the syllabus"), h("option", { value: "B" }, "B: probably in the syllabus"));
+  if (preset.status === "B") status.value = "B";
 
   function renderSummary() {
     if (state.outside) { summary.textContent = "The question will be marked as outside the syllabus and will not count for any topic."; return; }
@@ -696,8 +844,8 @@ export async function openMappingModal(q, { courseId, nodes, preset = {}, onSave
     const hits = choices.filter(ch => !term || ch.hay.includes(term));
     for (const ch of hits.slice(0, 200)) {
       const id = ch.n.id;
-      const radio = h("input", { type: "radio", name, value: id, checked: state.primary === id, disabled: state.outside });
-      const check = h("input", { type: "checkbox", checked: state.secondary.has(id), disabled: state.outside });
+      const radio = h("input", { type: "radio", name, value: id, checked: state.primary === id, disabled: state.outside, "aria-label": `Primary topic: ${nodeLabel(ch.n)}` });
+      const check = h("input", { type: "checkbox", checked: state.secondary.has(id), disabled: state.outside, "aria-label": `Secondary topic: ${nodeLabel(ch.n)}` });
       radio.addEventListener("change", () => { state.primary = id; state.secondary.delete(id); renderList(); renderSummary(); });
       check.addEventListener("change", () => {
         if (check.checked) { state.secondary.add(id); if (state.primary === id) state.primary = null; } else state.secondary.delete(id);
@@ -712,6 +860,7 @@ export async function openMappingModal(q, { courseId, nodes, preset = {}, onSave
   }
   let timer = null;
   search.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(renderList, 120); });
+  search.disabled = state.outside;
   outside.addEventListener("change", () => { state.outside = outside.checked; status.disabled = outside.checked; search.disabled = outside.checked; renderList(); renderSummary(); });
 
   const cancel = h("button", {}, "Cancel");

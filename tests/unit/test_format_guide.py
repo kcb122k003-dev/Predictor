@@ -124,6 +124,7 @@ def test_priority_reason_never_calls_a_missing_topic_unlikely():
                            facts={"mapping_confidence": 0.9},
                            guide={"basis": "history", "papers": 5, "display": "Numerical problem"})
     assert text.startswith("High priority (rank 3 of 25) because it appeared in 9 of 12 usable papers")
-    assert "numerical problem" in text and "5 of those papers" in text
+    # The format barely affects the rank, so it is not given as a reason for the priority.
+    assert "numerical problem" not in text and "format" not in text
     assert "no past papers" in priority_reason(category="Low Priority", rank=1, topics=3, stats={"usable_papers": 0},
                                                facts={}, guide=None)

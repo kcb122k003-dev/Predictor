@@ -191,14 +191,18 @@ def check_grounding(text: str, allowed: set[str], instruction_words: list[str]) 
 
 
 def _marks_range(history: list[HistoricalQuestion], fmt: str, course: list[HistoricalQuestion]
-                 ) -> tuple[float | None, float | None]:
+                 ) -> tuple[float | None, float | None, str | None]:
+    """(low, high, basis): the middle half of the marks of past questions of this format, from the topic's own
+    questions (basis "topic") or, with fewer than two of them, from the whole course (basis "course")."""
     vals = [q.marks for q in history if q.format == fmt and q.marks]
+    basis = "topic"
     if len(vals) < 2:
         vals = [q.marks for q in course if q.format == fmt and q.marks]
+        basis = "course"
     if not vals:
-        return None, None
+        return None, None, None
     lo, hi = np.percentile(vals, [25, 75])
-    return float(round(lo)), float(round(hi))
+    return float(round(lo)), float(round(hi)), basis
 
 
 def generate_formulations(tree: TopicTree, topic_id: int, topic_history: list[HistoricalQuestion],
@@ -302,7 +306,8 @@ def generate_formulations(tree: TopicTree, topic_id: int, topic_history: list[Hi
             grounding["checks"] = checks
             if not checks["passed"]:
                 continue
-        lo, hi = _marks_range(topic_history, fmt, course_history)
+        lo, hi, marks_basis = _marks_range(topic_history, fmt, course_history)
+        grounding["marks_basis"] = marks_basis
         out.append(Formulation(text=text, format=fmt, marks_low=lo, marks_high=hi, basis=basis,
                                evidence_question_ids=evidence, grounding=grounding, note=note, rank=len(out) + 1,
                                kind=kind))

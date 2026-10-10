@@ -47,5 +47,10 @@ def question_source(request: Request, question_id: int) -> dict[str, Any]:
 
 @router.get("/files/{file_id}/pages/{page_no}/image")
 def page_image(request: Request, file_id: int, page_no: int, highlight: str = "") -> Response:
-    png = ExplorerService(ctx(request)).page_image(file_id, page_no, highlight)
-    return Response(png, media_type="image/png", headers={"Cache-Control": "no-store"})
+    png, box = ExplorerService(ctx(request)).page_image_box(file_id, page_no, highlight)
+    headers = {"Cache-Control": "no-store"}
+    if box is not None:
+        # Where the highlight sits (fractions of the page height), so the viewer can scroll it into view.
+        headers["X-Highlight-Top"] = f"{box[0]:.4f}"
+        headers["X-Highlight-Bottom"] = f"{box[1]:.4f}"
+    return Response(png, media_type="image/png", headers=headers)

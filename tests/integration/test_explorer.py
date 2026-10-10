@@ -169,10 +169,14 @@ def test_illustrative_questions_are_labelled_grounded_and_never_history(api, ana
         assert g["description"] and g["why"] and g["evidence"] in ("established", "weak", "inferred")
         il = g.get("illustrative")
         if il:
-            assert il["note"].startswith("Illustrative practice question")
-            if il["basis"] == "past_values":  # a real question counted for this topic, named in the note
+            if il["basis"] == "past_values":
+                # A real question counted for this topic, shown word for word and named as a past question (never
+                # as a generated one).
+                assert il["note"].startswith(f"This is {il['source']['exam']}") and "real past paper" in il["note"]
                 d = c.get(f"/api/courses/{cid}/explorer/nodes/{p['topic_id']}").json()
                 assert str(il["source"]["question_id"]) in d["stats"]["roles"]
+            else:
+                assert il["note"].startswith("Illustrative practice question")
         if g["template"]:  # every value is a placeholder (units such as m3/s stay inside the brackets)
             assert not re.search(r"\d", re.sub(r"\[[^\]]*\]", "", g["template"]["text"])), g["template"]["text"]
         assert len(g["alternatives"]) <= 2

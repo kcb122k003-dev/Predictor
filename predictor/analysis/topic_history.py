@@ -26,6 +26,9 @@ from ..parsing.format_labels import FAMILY_ORDER, LABELS, display, family_displa
 VERSION = 1
 RECENT_WINDOW = 3
 LOW_PARSE_CONFIDENCE = 0.7
+# Counts are flagged provisional when at least this share of the counted questions are probable (status B), not
+# certain, syllabus matches.
+PROBABLE_SHARE = 0.5
 
 
 @dataclass
@@ -73,11 +76,27 @@ class QuestionInfo:
 
 
 def relation_of(qid: int, exact_prev: dict[int, list[int]], para_prev: dict[int, list[int]],
-                concept_prev: dict[int, list[int]]) -> tuple[str, list[int]]:
-    """How a question relates to questions in earlier papers (same-paper pairs never count)."""
-    for kind, links in (("exact", exact_prev), ("paraphrase", para_prev), ("concept", concept_prev)):
-        if links.get(qid):
-            return kind, sorted(links[qid])
+                concept_prev: dict[int, list[int]], families: dict[int, list[str]] | None = None
+                ) -> tuple[str, list[int]]:
+    """How a question relates to questions in earlier papers (same-paper pairs never count).
+
+    With ``families`` (question id -> format families), a repeat or paraphrase link to an earlier question asked in
+    a different format (a derivation and a numerical problem on the same equation) counts as the same concept
+    only: the student meets the idea again, not the same question.
+    """
+    mine = set((families or {}).get(qid) or [])
+
+    def same_format(other: int) -> bool:
+        theirs = set((families or {}).get(other) or [])
+        return not mine or not theirs or bool(mine & theirs)
+
+    exact = [e for e in exact_prev.get(qid, []) if same_format(e)]
+    para = [e for e in para_prev.get(qid, []) if same_format(e)]
+    concept = list(concept_prev.get(qid, [])) + [e for e in exact_prev.get(qid, []) + para_prev.get(qid, [])
+                                                 if not same_format(e)]
+    for kind, links in (("exact", exact), ("paraphrase", para), ("concept", concept)):
+        if links:
+            return kind, sorted(set(links))
     return "new", []
 
 
@@ -180,6 +199,10 @@ def node_stats(history: dict[str, Any], member: Callable[[int], bool],
     for e in appeared:
         for r in provisional_papers.get(e, []):
             reasons.append(f"{papers[e]['label']}: {r}")
+    probable = [qid for qid, q, _ in rows if q.get("status") == "B" and not q.get("manual")]
+    if rows and len(probable) / len(rows) >= PROBABLE_SHARE:
+        reasons.append(f"{len(probable)} of the {len(rows)} counted questions are probable, not certain, matches to "
+                       f"this item (mapping status B)")
     recent = list(range(max(0, T - RECENT_WINDOW), T))
     last = appeared[-1] if appeared else None
     return {
@@ -209,6 +232,7 @@ def node_stats(history: dict[str, Any], member: Callable[[int], bool],
         "multi_label_questions": multi,
         "repetition": {k: repetition.get(k, 0) for k in ("exact", "paraphrase", "concept", "new")},
         "uncounted_questions": sorted(uncounted),
+        "probable_questions": len(probable),
         "provisional": bool(reasons),
         "provisional_reasons": sorted(set(reasons))[:12],
     }

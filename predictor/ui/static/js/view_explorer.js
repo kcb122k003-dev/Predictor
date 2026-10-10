@@ -48,7 +48,9 @@ export async function renderExplorer(main, course, { sub } = {}) {
   const intro = h("p", { class: "muted" });
   const listBox = h("div", { class: "ex-tree", role: "navigation", "aria-label": "Syllabus items" });
   const countLine = h("span", { "aria-live": "polite" });
-  const panel = h("div", { class: "ex-main" });
+  const panel = h("div", { class: "ex-main", tabindex: "-1", "aria-label": "Selected item" });
+  const skip = h("a", { class: "ex-skip", href: "#", onclick: (e) => { e.preventDefault(); panel.focus(); panel.scrollIntoView({ block: "start" }); } },
+    "Skip to the selected item's details");
   const state = { q: "", unit: "", history: "", format: "", priority: "", evidence: "", sort: "syllabus" };
   const expanded = new Set();
   let ov = null;
@@ -91,7 +93,7 @@ export async function renderExplorer(main, course, { sub } = {}) {
   });
 
   const treePane = h("aside", { class: "ex-tree-pane", "aria-label": "Syllabus tree" },
-    h("div", { class: "ex-filters" }, search, filtersBox, selSort),
+    h("div", { class: "ex-filters" }, skip, search, filtersBox, selSort),
     h("div", { class: "ex-toolbar" }, countLine, h("span", { class: "spacer" }), expandAll, collapseAll),
     listBox);
   append(main, h("h1", {}, "Syllabus Explorer"), intro, banners, h("div", { class: "ex-layout" }, treePane, panel));
@@ -176,9 +178,14 @@ export async function renderExplorer(main, course, { sub } = {}) {
     return out;
   }
 
+  // History, format, priority and evidence describe topics, so they never select a unit (group) row; a unit is
+  // shown as the dimmed context of the topics that match. A unit matches only a text search.
+  const attributeFilters = () => !!(state.history || state.format || state.priority || state.evidence);
+
   function matches(n) {
     const s = n.stats;
     const p = n.prediction;
+    if (n.level === "group" && (attributeFilters() || !state.q)) return false;
     if (state.q) {
       const hay = `${n.number || ""} ${n.title || ""} ${n.original || ""} ${n.label || ""} ${(n.concepts || []).join(" ")}`.toLowerCase();
       if (!hay.includes(state.q)) return false;
@@ -213,7 +220,8 @@ export async function renderExplorer(main, course, { sub } = {}) {
       "data-id": n.id, "aria-current": n.id === selected ? "true" : null, title: tip,
       onclick: () => select(n.id),
     },
-    h("span", { class: "ex-dot", style: { background: p ? priorityColor(p) : "transparent" } }),
+    h("span", { class: "ex-dot", style: { background: p ? priorityColor(p) : "transparent" }, "aria-hidden": "true" }),
+    p ? h("span", { class: "sr-only" }, `${priorityWord(p)} priority. `) : null,
     h("span", { class: "ex-row-title" }, n.number ? h("span", { class: "ex-num" }, n.number) : null, n.number ? " " : null, n.title),
     s ? h("span", { class: "ex-count" }, `${s.exam_frequency}/${s.usable_papers} papers`) : h("span"),
     caption ? h("span", { class: "ex-caption" }, caption) : null,
@@ -272,7 +280,13 @@ export async function renderExplorer(main, course, { sub } = {}) {
       const ul = h("ul", { class: "ex-root" });
       treeLevel(ov.roots && ov.roots.length ? ov.roots : order.filter(id => !byId.has(byId.get(id).parent_id)), ul, visible, matchSet);
       listBox.appendChild(ul);
-      countLine.textContent = matchSet ? `${matchSet.size} of ${ov.nodes.length} items match` : `${ov.nodes.length} items`;
+      if (matchSet) {
+        const isGroup = (id) => (byId.get(id) || {}).level === "group";
+        const topics = [...matchSet].filter(id => !isGroup(id)).length;
+        const groups = matchSet.size - topics;
+        const total = ov.nodes.filter(n => n.level !== "group").length;
+        countLine.textContent = `${topics} of ${total} topics${groups ? ` and ${groups} unit${groups === 1 ? "" : "s"}` : ""} match`;
+      } else countLine.textContent = `${ov.nodes.length} items`;
       if (matchSet && !matchSet.size) listBox.appendChild(h("p", { class: "muted ex-none" }, ov.run ? "No item matches these filters." : "No item matches. History filters need an analysis first."));
       return;
     }
@@ -305,9 +319,14 @@ export async function renderExplorer(main, course, { sub } = {}) {
     if (!el) return;
     el.classList.add("active");
     el.setAttribute("aria-current", "true");
+    // The tree box can extend below the window (before the page scrolls and the pane sticks), so the row must be
+    // inside the part of the box that is on screen.
     const box = listBox.getBoundingClientRect();
+    const top = Math.max(box.top, 0);
+    const bottom = Math.min(box.bottom, window.innerHeight);
     const r = el.getBoundingClientRect();
-    if (r.top < box.top || r.bottom > box.bottom) listBox.scrollTop += r.top - box.top - box.height / 3;
+    if (bottom - top < 40) return;
+    if (r.top < top || r.bottom > bottom) listBox.scrollTop += r.top - top - (bottom - top) / 3;
   }
 
   // Selection and the main panel ---------------------------------------------
@@ -319,7 +338,8 @@ export async function renderExplorer(main, course, { sub } = {}) {
 
   function renderWelcome() {
     clear(panel);
-    const top = ov ? ov.nodes.filter(n => n.prediction).sort((a, b) => a.prediction.rank - b.prediction.rank).slice(0, 5) : [];
+    const ranked = ov ? ov.nodes.filter(n => n.prediction) : [];
+    const top = [...ranked].sort((a, b) => a.prediction.rank - b.prediction.rank).slice(0, 5);
     append(panel, h("div", { class: "card" },
       h("h3", {}, "Choose a syllabus item"),
       h("p", {}, "Select a unit or topic on the left. You will see how often it appeared in the past papers, every past question on it ",
@@ -327,7 +347,7 @@ export async function renderExplorer(main, course, { sub } = {}) {
       h("p", { class: "help" }, "Tags such as Historical fact, Statistical estimate and Model ranking tell you what kind of value you are reading. See Help for details."),
       top.length ? [h("h4", {}, "Highest ranked topics"), h("ol", { class: "ex-childpreds" }, top.map(n => h("li", {},
         h("button", { class: "ex-link", onclick: () => select(n.id) }, nodeLabel(n)), " ",
-        h("span", { class: "help" }, `${priorityWord(n.prediction)} priority. ${rankRangeText(n.prediction)}`))))] : null));
+        h("span", { class: "help" }, `${priorityWord(n.prediction)} priority, rank ${n.prediction.rank} of ${ranked.length}. ${rankRangeText(n.prediction, ranked.length)}`))))] : null));
   }
 
   async function showNode(id, { scroll = true } = {}) {

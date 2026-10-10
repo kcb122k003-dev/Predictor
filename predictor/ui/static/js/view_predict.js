@@ -1,8 +1,8 @@
 import { api } from "./api.js";
 import { CATEGORY_COLORS, append, badge, clear, componentBadge, drawer, h, num, pct, table, toast } from "./dom.js";
 import {
-  SEPARATE_NOTE, formatEvidenceTag, freshnessBanner, illustrativeBlock, kindTag, priorityColor, priorityWord, rankRangeText,
-  renderNodePanel, templateBlock,
+  SEPARATE_NOTE, formatEvidenceTag, formatSummary, freshnessBanner, illustrativeBlock, kindTag, priorityColor, priorityWord,
+  rankRangeText, renderNodePanel, templateBlock,
 } from "./topic_panel.js";
 
 // Group headings. Runs made before the rename say "Extremely High Priority"; they are listed under Very High.
@@ -10,6 +10,7 @@ const CATEGORIES = ["Very High Priority", "High Priority", "Moderate Priority", 
 const OLD_CATEGORIES = { "Extremely High Priority": "Very High Priority" };
 const plural = (n, word, many = `${word}s`) => `${n} ${n === 1 ? word : many}`;
 const nodeLabel = (n) => `${n.number || ""} ${n.title || ""}`.trim();
+const letters = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 
 export async function renderPredict(main, course, { refreshCourse }) {
   const head = h("div");
@@ -89,7 +90,7 @@ export async function renderPredict(main, course, { refreshCourse }) {
     append(body, h("div", { class: "grid cols-4" },
       stat(s.exams, "past papers analysed"), stat(s.counted_questions, `of ${s.questions} questions inside the syllabus`),
       stat(s.selected_display, "prediction method used"),
-      stat(s.calibrated ? "Calibrated" : "Relative scores", s.calibrated ? "percentages are validated probabilities" : "percentages are not probabilities")));
+      stat(s.calibrated ? "Calibrated" : "Relative scores", s.calibrated ? "percentages are validated probabilities" : "scores are not probabilities")));
     append(body, h("div", { class: "card" }, h("p", { style: { margin: 0 } }, h("strong", {}, "Why this ranking: "), s.selection_reason),
       h("p", { class: "muted", style: { margin: "6px 0 0" } }, s.calibration_reason),
       h("div", { class: "row", style: { marginTop: "8px" } },
@@ -102,6 +103,7 @@ export async function renderPredict(main, course, { refreshCourse }) {
     append(body, h("p", { class: "help" }, "Topic predictions are the main output. Exact wording is much harder to predict, so an ",
       "illustrative practice question shows the general form a question could take, not the actual exam question. ",
       "Select a topic to see its full history, past questions and syllabus source."));
+    if (s.calibrated) append(body, h("p", { class: "help" }, h("strong", {}, "About the percentages: "), SEPARATE_NOTE));
 
     for (const cat of CATEGORIES) {
       const items = preds.filter(p => (OLD_CATEGORIES[p.category] || p.category) === cat);
@@ -138,7 +140,8 @@ export async function renderPredict(main, course, { refreshCourse }) {
     return h("div", { class: "card" },
       h("div", { class: "row" }, h("h3", { style: { margin: 0 } }, "Inference status"), badge(ev.mode, ev.mode === "Advanced inference" ? "ok" : "info"),
         ev.evidence_quality ? badge(`evidence quality: ${ev.evidence_quality.toLowerCase()}`) : null,
-        ev.uncertainty && ev.uncertainty.overall ? badge(`prediction uncertainty: ${ev.uncertainty.overall.toLowerCase()}`, ev.uncertainty.overall === "High" ? "warn" : "") : null),
+        ev.uncertainty && ev.uncertainty.overall ? h("span", { class: `badge ${ev.uncertainty.overall === "High" ? "warn" : ""}`, title: "How far the topics could move in the ranking with the available papers. Notes below about learned parameters describe one component of the model, not the ranking as a whole." },
+          `rank uncertainty: ${ev.uncertainty.overall.toLowerCase()}`) : null),
       h("p", { style: { margin: "8px 0 4px" } }, ev.message),
       v.message ? h("p", { class: "help", style: { margin: "0 0 6px" } }, v.message) : null,
       (ev.notes || []).map(n => h("p", { class: "help", style: { margin: "0 0 4px" } }, n)),
@@ -156,11 +159,15 @@ export async function renderPredict(main, course, { refreshCourse }) {
     const open = h("button", { class: "ex-link pr-title", "aria-haspopup": "dialog", title: "Show this topic's history, past questions and format guide",
       onclick: (e) => { e.stopPropagation(); openTopic(p.topic_id); } }, p.label);
     const path = unitPath(p.topic_id);
+    const node = nodeById.get(p.topic_id);
+    const original = node && node.original && letters(node.original) !== letters(nodeLabel(node)) ? node.original : null;
     const el = h("article", { class: "topic-card" },
       h("div", { class: "rank", title: "Rank" }, String(p.rank)),
       h("div", { class: "pr-body" },
         h("dl", { class: "pr-fields" },
-          item("Predicted topic", open, path ? h("div", { class: "help" }, path) : null),
+          item("Predicted topic", open,
+            original ? h("div", { class: "pr-original" }, h("span", { class: "help" }, "Syllabus wording: "), original) : null,
+            path ? h("div", { class: "help" }, path) : null),
           item("Priority", priorityField(p)),
           item("Likelihood", likelihoodField(p, calibrated)),
           item("Historical support", historyField(p)),
@@ -175,10 +182,13 @@ export async function renderPredict(main, course, { refreshCourse }) {
     return el;
   }
 
+  // The topic's units, with names the app supplied (not read from the syllabus) marked as inferred.
   function unitPath(topicId) {
     const out = [];
-    for (let n = nodeById.get((nodeById.get(topicId) || {}).parent_id); n; n = nodeById.get(n.parent_id)) out.unshift(nodeLabel(n));
-    return out.join(" › ");
+    for (let n = nodeById.get((nodeById.get(topicId) || {}).parent_id); n; n = nodeById.get(n.parent_id)) {
+      out.unshift(n.inferred ? h("span", { class: "pr-inferred", title: n.inferred_reason || "Name supplied by the app" }, nodeLabel(n), " (name inferred)") : nodeLabel(n));
+    }
+    return out.length ? out.flatMap((x, i) => (i ? [" › ", x] : [x])) : null;
   }
 
   function item(label, ...value) {
@@ -219,9 +229,18 @@ export async function renderPredict(main, course, { refreshCourse }) {
       return [`No historical evidence in the ${plural(T || 0, "usable paper")}. `, kindTag("fact"),
         h("div", { class: "help" }, "Not appearing before is not evidence that it will not be examined.")];
     }
-    return [`Appeared in ${a} of ${T} usable papers; ${plural(n || 0, "question")}${last ? `; last appeared ${last}` : ""}. `, kindTag("fact"),
-      top ? h("div", { class: "help" }, `Most common format: ${top.display} in ${plural(top.papers, "paper")}`) : null,
-      hs && hs.provisional ? h("div", {}, h("span", { class: "badge warn", title: (hs.provisional_reasons || []).join("; ") }, "Counts provisional")) : null];
+    const secOnly = hs ? hs.secondary_only_papers || 0 : 0;
+    const role = secOnly && secOnly === a
+      ? (n === 1 ? ", only as the secondary topic of a question on another topic" : ", only as a secondary topic of questions on other topics")
+      : secOnly ? ` (in ${secOnly} of them only as a secondary topic)` : "";
+    // The same format names and counts as the Syllabus Explorer, with ties named as ties.
+    const fams = ((nodeById.get(p.topic_id) || {}).stats || {}).families;
+    const formats = fams && fams.length ? formatSummary(fams, a, T, "this topic")
+      : top ? `Most common format: ${top.display}, in ${top.papers} of the ${plural(a, "paper")} containing this topic.` : "";
+    return [`Appeared in ${a} of ${T} usable papers${role}; ${plural(n || 0, "question")}${last ? `; last appeared ${last}` : ""}. `, kindTag("fact"),
+      formats ? h("div", { class: "help" }, formats) : null,
+      hs && hs.provisional ? h("div", {}, h("span", { class: "badge warn", title: (hs.provisional_reasons || []).join("; ") }, "Counts provisional"),
+        (hs.provisional_reasons || []).length ? h("span", { class: "help" }, ` ${hs.provisional_reasons[0]}${hs.provisional_reasons.length > 1 ? ` (and ${hs.provisional_reasons.length - 1} more)` : ""}`) : null) : null];
   }
 
   // The description repeats the format name ("Numerical problem: calculate ..."); the card shows the name already.
@@ -236,9 +255,12 @@ export async function renderPredict(main, course, { refreshCourse }) {
   function formatDetails(g) {
     const il = g.illustrative || null;
     const first = il ? String(il.text || "").split("\n")[0] : "";
+    const past = il && il.basis === "past_values";
     const alts = (g.alternatives || []).slice(0, 2);
     return h("details", { class: "pr-details" },
-      h("summary", {}, h("span", { class: "pr-sum-label" }, "Question format details"), first ? h("span", { class: "pr-sum-q" }, first) : null),
+      h("summary", {}, h("span", { class: "pr-sum-label" }, "Question format details"),
+        first ? h("span", { class: "pr-sum-q" }, kindTag(past ? "fact" : "illustrative"), " ",
+          past ? "Past question to practise: " : "Practice example: ", first) : null),
       il ? illustrativeBlock(il) : g.illustrative_note ? h("p", { class: "help" }, g.illustrative_note) : null,
       g.template ? templateBlock(g.template) : null,
       g.why ? h("p", {}, h("strong", {}, "Why this format: "), g.why) : null,
@@ -253,16 +275,18 @@ export async function renderPredict(main, course, { refreshCourse }) {
   function openTopic(topicId) {
     const top = h("div");
     const box = h("div");
-    const d = drawer(h("div", { class: "pr-drawer" }, top, box), { wide: true, label: "Topic details" });
+    const link = h("a", { class: "btn small", href: `#/course/${course.id}/explorer/${topicId}` }, "Open in Syllabus Explorer");
+    const d = drawer(h("div", { class: "pr-drawer" }, top, box), { wide: true, label: "Topic details", actions: [link] });
     let token = 0;
     async function load(id) {
       const t = ++token;
+      link.setAttribute("href", `#/course/${course.id}/explorer/${id}`);
       clear(box);
       box.appendChild(h("div", { class: "card ex-loading", role: "status" }, "Loading..."));
       try {
         const data = await api.get(`/api/courses/${course.id}/explorer/nodes/${id}`);
         if (t !== token || !d.panel.isConnected) return;
-        renderNodePanel(box, data, { courseId: course.id, nodes, explorerLink: true, onNavigate: load, onChanged: changed });
+        renderNodePanel(box, data, { courseId: course.id, nodes, onNavigate: load, onChanged: changed });
         d.panel.scrollTop = 0;
       } catch (e) {
         if (t !== token) return;
