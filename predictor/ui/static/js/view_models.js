@@ -143,7 +143,7 @@ export async function renderModels(main, course) {
           h("p", { class: "help" }, `Rank intervals: ${evidence.uncertainty ? evidence.uncertainty.jackknife_replicates : 0} leave-one-paper-out rankings and `,
             `${evidence.uncertainty ? evidence.uncertainty.posterior_draws : 0} posterior draws`,
             evidence.uncertainty && evidence.uncertainty.held_fixed && evidence.uncertainty.held_fixed.length ? ` (held fixed: ${evidence.uncertainty.held_fixed.join(", ")})` : "", "."),
-          gc.checked ? h("p", { class: "help" }, `Generated formulations checked: ${gc.checked}; rejected for topic ${gc.rejected.topic}, semantic fit ${gc.rejected.semantic}, question type ${gc.rejected.type}.`) : null)),
+          gc.checked ? h("p", { class: "help" }, `Practice questions checked (generated ones, and past numerical questions before they are reused): ${gc.checked}. Failed the topic check: ${gc.rejected.topic}; semantic fit: ${gc.rejected.semantic}; question type: ${gc.rejected.type} (a question can fail more than one).`) : null)),
       h("h4", { style: { marginTop: "12px" } }, "Ensemble components"),
       table([{ label: "Component", key: "display" }, { label: "Status", render: r => componentBadge(r.status) },
         { label: "Weight", render: r => r.weight === null ? "" : pct(r.weight), num: true },

@@ -26,11 +26,19 @@ syllabus + past papers (papers without a year are excluded at ingestion)
   -> calibration (only if the Brier gain over the base rate on later papers clears a one-sided 95% t-bound)
   -> rank intervals (jackknife, united with Dirichlet-weight and posterior draws), credible intervals,
      per-topic evidence strength (posterior/prior variance ratio), explanations
-  -> topics first, then verified question formulations
+  -> topics first, then each topic's format guide and checked practice questions
 
 With no papers: general model + syllabus structure, every topic's rank range is [1, K], uncertainty High,
 no probabilities.
 ```
+
+The Predictions tab and the Syllabus Explorer show what this pipeline produced; they do not change how topics
+are ranked. Each run stores a `topic_history` artifact built from the same counted question mappings that fill
+the topic panel, and the run logs an error if any topic's paper or question count differs from the panel. Both
+tabs read that artifact and the same prediction rows, so their numbers agree. A mapping you correct in the
+explorer counts only after you re-analyse, as in the topic mapping step. The top priority category is now called
+Very High Priority; runs made before the rename stored the old name, Extremely High, and the app lists them under
+Very High. The thresholds did not change. The [user guide](USER_GUIDE.md) describes both tabs in sections 10 and 11.
 
 ## 2. What replaced the cutoff
 
@@ -259,7 +267,10 @@ uncertainty." It never says that inference is disabled.
   papers stay the same (causal K). It builds the panel directly, so it does not exercise the alignment feedback
   pass. No dedicated test covers the causal feedback. The regression snapshot pins the demo's status counts
   (A 104 / B 30 / C 6 / D 4); they were A 109 / B 27 / C 4 / D 4 before the feedback became causal, so reverting
-  it would fail `test_data_layer_unchanged`.
+  it would fail `test_data_layer_unchanged`. Mapping corrections are labels, and the feedback pass uses only
+  earlier papers' automatic matches: `test_mapping_correction_marks_results_stale_and_updates_counts_without_leakage`
+  moves one question of the last demo paper to another topic, re-analyses, and checks that every backtest result
+  for the earlier papers is unchanged to within 1e-9.
 
 ## 8. Results
 
@@ -303,6 +314,35 @@ generator from `tests/unit/test_low_data.py`.
 Selection replaced the ensemble 0 of 40 times at every size. On the next paper the ensemble's gain over frequency
 is small and clearly positive only at T = 5.
 
+These simulation tables were not re-measured for the paraphrase fix below, and they do not need to be: simulated
+courses are built directly as topic panels with no question text, so repeat detection never runs on them.
+
+### Change in this version: paraphrase detection
+
+Repeat detection (`topic_modeling/families.py`) marks a question as an exact repeat or a paraphrase of an earlier
+one when its text similarity and a fuzzy string ratio clear set thresholds. The string ratio was
+`token_set_ratio`, which scores 100 whenever one question's words are a subset of the other's. A short-note title
+such as "Continuity equation" therefore matched a long derivation question that contained those words, and the
+matches chained separate questions into one large repeat family. Now, when one question has fewer than half as
+many distinct content words as the other, the string ratio is the lower of `token_set_ratio` and `token_sort_ratio`, so a
+subset no longer scores 100.
+
+The repeat flags feed two course-only features, `exact_repeat_rate` and `para_repeat_rate`, which the course
+logistic and the tree models use. The fix therefore changes model input, and the demo numbers below were measured
+again with it. On the app's mapped labels the course logistic rose from 0.682 to 0.710 and the ensemble fell from
+0.717 to 0.710; ensemble minus frequency went from +0.039 ± 0.019 (9 better, 2 worse) to +0.033 ± 0.019
+(8 better, 3 worse). Against the true topics the course logistic went from 0.689 to 0.697, the ensemble from 0.738
+to 0.731, and ensemble minus frequency from +0.004 ± 0.017 to -0.003 ± 0.016. Calibration now picks Platt scaling
+instead of isotonic regression (Brier 0.193 instead of 0.191, against 0.248 for the base rate).
+
+The ablation's exact-repeat recall for the frequency stage fell from about 0.43 to about 0.17. That column counts
+a held-out repeat as found when its repeat family is among the top K predicted families. Chained families were
+few and large, so a top-K list covered many questions; families are now smaller, so the target is finer. The drop
+comes from this change of definition. It does not mean the ranking got worse.
+
+A second fix: a question you mark as outside the syllabus is now treated as status D by the next analysis.
+Earlier builds ignored that mark. The demo has no manual mappings, so this fix does not move its numbers.
+
 ### Synthetic demo course (12 papers, 25 topics, 144 questions, 11 held-out papers, K = 11)
 
 Scored by the app against its own mapped labels (what a real course can measure), NDCG@11, mean ± standard error
@@ -311,40 +351,42 @@ over 11 papers:
 | Method | NDCG@11 | Status, weight |
 |---|---:|---|
 | General ranking model (cross-course) | 0.730 ± 0.022 | ACTIVE, 21% |
-| **Evidence-aware ensemble (final)** | **0.717 ± 0.027** | final |
-| Semantic evidence (pretrained) | 0.712 ± 0.021 | ACTIVE, 21% |
+| Semantic evidence (pretrained) | 0.712 ± 0.021 | ACTIVE, 20% |
+| **Evidence-aware ensemble (final)** | **0.710 ± 0.026** | final |
+| Course logistic | 0.710 ± 0.019 | LIMITED, 6% (reliability 0.34) |
 | Best single method chosen on earlier papers | 0.707 ± 0.022 | reference |
-| Random forest | 0.696 ± 0.042 | LIMITED, 3% (reliability 0.23) |
+| Random forest | 0.696 ± 0.043 | LIMITED, 3% (reliability 0.23) |
 | Recent-window frequency | 0.687 ± 0.017 | reference |
-| Course logistic | 0.682 ± 0.025 | LIMITED, 4% (reliability 0.34) |
 | Two-state Markov | 0.682 ± 0.024 | ACTIVE, 12% |
 | Most frequent topics | 0.678 ± 0.024 | reference |
 | Temporal recurrence (hazard if justified) | 0.678 ± 0.024 | ACTIVE, 9% |
 | Hierarchical Bayesian recurrence | 0.673 ± 0.026 | ACTIVE, 9% |
-| Gradient boosting | 0.667 ± 0.048 | LIMITED, 2% |
-| Recency-frequency | 0.666 ± 0.023 | ACTIVE, 10% |
+| Gradient boosting | 0.668 ± 0.048 | LIMITED, 2% |
+| Recency-frequency | 0.666 ± 0.023 | ACTIVE, 9% |
 | Syllabus coverage | 0.614 ± 0.043 | DOWNWEIGHTED, 4% |
 | Pooled HMM | 0.604 ± 0.030 | DOWNWEIGHTED, 2% |
 | Question-type fit | 0.553 ± 0.035 | DOWNWEIGHTED, 2% |
 | Topic co-occurrence | 0.525 ± 0.028 | DOWNWEIGHTED, 1% |
 | Random selection | 0.456 | reference |
 
-95% interval of the ensemble's mean: 0.657-0.777 (width 0.12); fold standard deviation 0.090. Paired
-differences, ensemble minus baseline: random +0.261 ± 0.024 (better on 11 papers, worse on 0), frequency
-+0.039 ± 0.019 (9 better, 2 worse), recency-frequency +0.051 ± 0.019 (8 better, 2 worse), Bayesian recurrence
-+0.043 ± 0.020 (7 better, 4 worse). Final-model check: ensemble 0.717 against `best_single` 0.707, difference
-+0.010 ± 0.018, so the ensemble was kept. Before alignment feedback became causal, the held-out paper's own
-wording fed the alignment, and most app-label scores were optimistic. Measured in isolation (current code with
-only the feedback pass switched back to all papers), making the feedback causal changed the scores by -0.072
-(co-occurrence) to +0.016 (coverage): ensemble -0.023, frequency -0.031, semantic evidence -0.033, while
-coverage, course logistic (+0.002) and random forest (+0.003) went up. The larger drop in the regression
-snapshot (ensemble 0.754 to 0.717) also includes other review fixes (causal K, capped semantic evidence, gate
-changes), so causal feedback accounts for only part of it.
+95% interval of the ensemble's mean: 0.652-0.768 (width 0.116); fold standard deviation 0.086. Paired
+differences, ensemble minus baseline: random +0.254 ± 0.024 (better on 11 papers, worse on 0), frequency
++0.033 ± 0.019 (8 better, 3 worse), recency-frequency +0.045 ± 0.020 (7 better, 2 worse), Bayesian recurrence
++0.037 ± 0.018 (7 better, 4 worse). Final-model check: ensemble 0.710 against `best_single` 0.707, difference
++0.004 ± 0.019, so the ensemble was kept.
+
+History, measured on the build before the paraphrase fix (when the ensemble scored 0.717): before alignment
+feedback became causal, the held-out paper's own wording fed the alignment, and most app-label scores were
+optimistic. Measured in isolation (that build with only the feedback pass switched back to all papers), making
+the feedback causal changed the scores by -0.072 (co-occurrence) to +0.016 (coverage): ensemble -0.023,
+frequency -0.031, semantic evidence -0.033, while coverage, course logistic (+0.002) and random forest (+0.003)
+went up. The larger drop in the regression snapshot at that time (ensemble 0.754 to 0.717) also includes other
+review fixes (causal K, capped semantic evidence, gate changes), so causal feedback accounts for only part of it.
 
 Scored against the generator's planted true topics, the measure the app cannot see for a real course (label
-agreement 92.3%), the picture is different. Ensemble 0.738 ± 0.025, frequency 0.734 ± 0.020, window 0.745,
-general model 0.747, semantic 0.747, random forest 0.749, Bayesian recurrence 0.685, course logistic 0.689.
-Ensemble minus frequency is +0.004 ± 0.017, so **the demo does not show an improvement over plain frequency.**
+agreement 92.3%), the picture is different. Ensemble 0.731 ± 0.024, frequency 0.734 ± 0.020, window 0.745,
+general model 0.747, semantic 0.747, random forest 0.741, Bayesian recurrence 0.685, course logistic 0.697.
+Ensemble minus frequency is -0.003 ± 0.016, so **the demo does not show an improvement over plain frequency.**
 Part of the gain against mapped labels comes from components such as semantic evidence, which use the same
 alignment scores that produce the labels. They cannot see the held-out paper, but they share the alignment's
 systematic choices. We report both measurements rather than the favourable one.
@@ -354,36 +396,49 @@ two-sided 95% t-interval, t(10) = 2.23):
 
 | Stage | NDCG | Change | Hit@1 | Recall@11 | Concept recall | Exact repeats |
 |---|---:|---:|---:|---:|---:|---:|
-| Frequency only | 0.678 | | 0.82 | 0.616 | 0.616 | 0.431 |
-| + recency | 0.663 | -0.015 ± 0.008 | 0.82 | 0.593 | 0.593 | 0.429 |
-| + Bayesian smoothing | 0.669 | +0.006 ± 0.017 | 0.82 | 0.601 | 0.601 | 0.460 |
-| + semantic | 0.720 | +0.052 ± 0.019 (reliable) | 1.00 | 0.634 | 0.634 | 0.450 |
-| + topic structure | 0.699 | -0.021 ± 0.016 | 0.91 | 0.633 | 0.633 | 0.440 |
-| + temporal dynamics | 0.694 | -0.005 ± 0.003 | 0.91 | 0.633 | 0.633 | 0.450 |
-| Full ensemble | 0.716 | +0.022 ± 0.010 | 0.91 | 0.667 | 0.667 | 0.460 |
+| Frequency only | 0.678 | | 0.82 | 0.616 | 0.616 | 0.168 |
+| + recency | 0.663 | -0.015 ± 0.008 | 0.82 | 0.593 | 0.593 | 0.156 |
+| + Bayesian smoothing | 0.669 | +0.006 ± 0.017 | 0.82 | 0.601 | 0.601 | 0.185 |
+| + semantic | 0.720 | +0.052 ± 0.019 (reliable) | 1.00 | 0.634 | 0.634 | 0.185 |
+| + topic structure | 0.699 | -0.021 ± 0.016 | 0.91 | 0.633 | 0.633 | 0.185 |
+| + temporal dynamics | 0.694 | -0.005 ± 0.003 | 0.91 | 0.633 | 0.633 | 0.168 |
+| Full ensemble | 0.717 | +0.023 ± 0.018 | 0.91 | 0.667 | 0.667 | 0.238 |
 
-Only "+ semantic" is a reliable change; no stage is a reliable loss. Leave-one-out from the full ensemble (0.717;
-the staged "Full ensemble" row scores 0.716 because it also keeps the frequency baseline), change in NDCG when
-the component is removed: general model -0.031 ± 0.014, semantic evidence -0.020 ± 0.017,
-course logistic -0.007 ± 0.006, Markov -0.004 ± 0.006, question-type fit +0.016 ± 0.009, coverage
-+0.009 ± 0.008, recency-frequency +0.005 ± 0.005, Bayesian recurrence +0.004 ± 0.010; the others within ±0.001.
-On this course question-type fit and coverage add noise. The ensemble downweights them (2% and 4%) but does not
-drop them. The demo syllabus has no sub-topics below topics, so concept recall equals topic recall here.
+The NDCG, Hit@1 and recall columns of the first six rows are the same as before the paraphrase fix, because those
+stages contain no component that reads the repeat features. The exact-repeat column is lower in every row because
+repeat families are finer (see "Change in this version" above).
+
+Only "+ semantic" is a reliable change; no stage is a reliable loss. Leave-one-out from the full ensemble (0.710;
+the staged "Full ensemble" row scores 0.717 because it also keeps the frequency baseline), change in NDCG when
+the component is removed: general model -0.018 ± 0.015, semantic evidence -0.013 ± 0.013, Markov
+-0.005 ± 0.006, question-type fit +0.021 ± 0.010, Bayesian recurrence +0.011 ± 0.012, coverage +0.009 ± 0.008,
+HMM +0.008 ± 0.008, gradient boosting +0.008 ± 0.008, recency-frequency +0.004 ± 0.005, temporal recurrence
++0.004 ± 0.005, course logistic 0.000 ± 0.009; co-occurrence and random forest within ±0.001. None of these
+changes lies outside the two-sided 95% interval. On this course, removing question-type fit, coverage, the HMM or
+gradient boosting raises the score a little, so they add noise here. The ensemble downweights them (2-4% each) but
+does not drop them. The demo syllabus has no
+sub-topics below topics, so concept recall equals topic recall here.
 
 Other demo measurements:
 
 * Alignment (hybrid, causal feedback) puts 131 of 140 in-syllabus questions on the right topic; all 9 misses have
   status B. All 4 old-syllabus questions are marked D (outside), and no other question is. Status counts: A 104,
   B 30, C 6, D 4; 134 of 144 questions are counted.
-* Syllabus filter: with the filter 0.717 ± 0.027, without it 0.690 ± 0.026 (change -0.027 ± 0.019).
-* Calibration is valid. Isotonic was chosen over Platt by nested log loss. Validated on 10 later papers: Brier
-  0.191 vs 0.248 for the base rate (skill 23%, gain 0.057 ± 0.005); expected calibration error 0.042.
+* Syllabus filter: with the filter 0.710 ± 0.026, without it 0.682 ± 0.026 (change -0.028 ± 0.020).
+* Calibration is valid. Platt scaling was chosen over isotonic regression by nested log loss (the build before
+  the paraphrase fix chose isotonic). Validated on 10 later papers: Brier 0.193 vs 0.248 for the base rate
+  (skill 22%, gain 0.055 ± 0.004); expected calibration error 0.054.
 * Uncertainty: 15 topics Low, 10 Medium; median rank-range width 4; overall prediction uncertainty "low",
   evidence quality "moderate".
-* Generated formulations: 53 checked, 2 rejected, 0 for question type. Each rejected one failed both the topic
-  and the semantic check: a pipe Bernoulli numerical filed under "Pressure and its measurement" and a jet-impact
-  numerical under "Laminar flow". Both are reused past numericals.
+* Practice questions: 79 checked, 4 failed the topic check, 3 the semantic check and 0 the question-type check;
+  3 failed both, so 4 were rejected in all. The three that failed both are reused past numericals offered for a
+  topic they do not fit: a jet-impact numerical for "Laminar flow" (twice) and a pipe Bernoulli numerical for
+  "Pressure and its measurement". The fourth, a short note on determining metacentric height, offered for the
+  topic of that name, aligned with "Buoyancy and floatation" instead and failed the topic check only. A generated
+  question that passes carries the label "Illustrative practice question - not a real exam question" in the app
+  and ILLUSTRATIVE PRACTICE QUESTION in exports.
 * The leakage audit passes for 34 models (target index 6), including the tuned and ensemble models.
+* Building the topic history takes 0.09 seconds for 400 topics and 6,000 questions.
 
 ### Alignment backends
 
@@ -440,7 +495,7 @@ migration test.
 
 * With one held-out paper, accuracy cannot be measured, and with fewer than about five the confidence interval is
   wider than most differences between methods. The app says so.
-* On the demo course the ensemble does not beat frequency against the true topics (+0.004 ± 0.017), and on
+* On the demo course the ensemble does not beat frequency against the true topics (-0.003 ± 0.016), and on
   simulated courses its next-paper gain over frequency is small (-0.008 to +0.032). The gains shown above come
   mostly from in-sample backtests on simulated courses, which are only as realistic as their generators.
 * The general model is trained on simulated sequences (`inference/generic_prior.json`, 400 simulated courses,
@@ -459,7 +514,7 @@ migration test.
 * Rank intervals hold classifier components fixed during the leave-one-paper-out step.
 * Some components add noise on some courses (question-type fit and coverage on the demo). The ensemble
   downweights them but does not drop them.
-* An analysis takes about 9 seconds for the 12-paper demo course on 4 cores (single-threaded BLAS).
+* An analysis takes about 10 seconds for the 12-paper demo course on 4 cores (single-threaded BLAS).
 
 ## 12. Settings
 

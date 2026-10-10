@@ -35,15 +35,48 @@ nothing needs an internet connection after installation.
    earlier papers (picked again before each held-out paper) beat it on the same held-out papers
    beyond a one-sided 95% t-bound of the paired differences (`ensemble.replace_confidence`).
 5. **Explains every prediction.** Recent and total appearances, gaps, how often topics in this
-   course reappear after a given gap, marks, formats, signal contributions, and "why not" notes
-   for low-ranked topics. Each topic also shows a rank range, an uncertainty level and an evidence
-   strength, because a high score does not mean the app is certain. Percentages are shown as
-   probabilities only when the calibrated Brier score beat the base rate on later held-out papers
-   beyond a one-sided 95% t-bound; otherwise you see relative scores.
-6. **Suggests grounded question formulations and practice papers**, built from your course's own
-   wording and syllabus phrases. It never invents numbers for numerical questions. Topics are
-   ranked first, and each formulation must pass syllabus, topic, semantic and question-type checks
-   before it is shown.
+   course reappear after a given gap, marks, signal contributions, a one-line reason for the
+   priority, and "why not" notes for low-ranked topics. Each topic also shows a rank range, an
+   uncertainty level and an evidence strength, because a high score does not mean the app is
+   certain. Percentages are shown as probabilities only when the calibrated Brier score beat the
+   base rate on later held-out papers beyond a one-sided 95% t-bound; otherwise you see a relative
+   score, labelled "not a probability".
+6. **Shows each prediction as a clear card.** A card on the Predictions tab gives the predicted
+   topic in the syllabus's own wording, its priority (Very high, High, Moderate or Low, with its
+   rank), the likelihood, its history (how many of the usable papers it appeared in, how many
+   questions, when it last appeared) and the general question format to prepare. Click a card to
+   open the same topic panel the Syllabus Explorer uses.
+7. **Tells you which question format to prepare.** For each topic the app suggests the format it
+   was asked in across the most papers and shows why (the counts), the marks it carried, a
+   reliability note and up to two alternatives. Generated practice questions are labelled
+   "Illustrative practice question - not a real exam question" and must pass syllabus, topic,
+   semantic and question-type checks. For numerical problems the app never invents values: it
+   shows a real past question word for word, labelled "Past exam question to practise" with its
+   paper and question number.
+8. **Lets you explore the syllabus.** The Syllabus Explorer tab (top bar, or a course's sidebar)
+   uses the files you already uploaded. On the left is the syllabus tree as parsed, which you can
+   search, filter by unit, history, format, priority or evidence, and sort by frequency, likelihood
+   or last appearance. Select any unit or topic to see:
+   * its history: how many of the usable papers asked about it, how many questions, when it last
+     appeared, and a paper-by-paper timeline;
+   * every past question in its original wording, with paper, question number, marks, file and
+     page (View original opens the page);
+   * for a topic, the question format to prepare and why, and the likelihood (or the relative
+     score when probabilities are not validated) with priority and rank range; a unit lists its
+     topics' predictions instead;
+   * the syllabus source: file, page and the extracted passage, marked on an image of the page for
+     PDFs.
+
+   Each value carries a tag (Historical fact, Statistical estimate, Model ranking, Model input,
+   Illustrative, Inferred or Weak evidence) so you know what kind of value it is. Both tabs read
+   one stored topic history, built from the same question records the model uses, so their numbers
+   match. You can also correct a question's topic from here.
+9. **Warns you when results are out of date.** Each analysis stores a fingerprint of your papers,
+   questions, manual mappings, syllabus and analysis settings. If any of them changes, or the run
+   came from an older engine version, both tabs show "Results out of date" with what changed and
+   a Re-analyse now button. Nothing is recomputed until you press it. A run made before this
+   check existed has no fingerprint, so it is not flagged; the explorer shows a note asking you
+   to re-run it instead.
 
 ## Quick start
 
@@ -77,32 +110,38 @@ Install Tesseract for scanned papers: `sudo apt install tesseract-ocr` (Ubuntu/D
 
 ## What results look like on the demo course
 
-12 synthetic papers, 144 questions, 25 syllabus topics, analysed in about 9 seconds on a
-4-core machine. The scores below compare each method's ranking with the topics the app itself
-mapped the held-out questions to, which is all a real course can measure:
+12 synthetic papers, 144 questions, 25 syllabus topics, analysed in about 10 seconds on a
+4-core machine with engine version 2.1. The scores below compare each method's ranking with the
+topics the app itself mapped the held-out questions to, which is all a real course can measure:
 
 | Method | NDCG@11 on 11 held-out papers (mean ± SE) |
 |---|---:|
 | General ranking model (cross-course) | 0.730 ± 0.022 |
-| **Evidence-aware ensemble (final ranking)** | **0.717 ± 0.027** |
 | Semantic evidence (pretrained) | 0.712 ± 0.021 |
+| **Evidence-aware ensemble (final ranking)** | **0.710 ± 0.026** |
 | Best single method chosen on earlier papers | 0.707 ± 0.022 |
 | Recent-window frequency | 0.687 ± 0.017 |
 | Most frequent topics | 0.678 ± 0.024 |
 | Hierarchical Bayesian recurrence | 0.673 ± 0.026 |
 | Random selection (exact expectation) | 0.456 |
 
-Against these labels the ensemble beat plain frequency by +0.039 ± 0.019 (better on 9 of 11
-papers). Against the generator's planted true topics, which the app cannot see, the difference is
-+0.004 ± 0.017, so the demo shows no improvement over frequency there. Part of the gain against
-mapped labels comes from the semantic component, which shares the alignment's systematic choices.
-On simulated courses with known outcomes, in-sample backtests put the ensemble 0.016-0.08 above
-frequency at 3-20 papers. Scored strictly on the next paper, the gain is small: -0.008 to +0.032.
-See [Low-data inference](docs/LOW_DATA_INFERENCE.md#8-results).
+Against these labels the ensemble beat plain frequency by +0.033 ± 0.019 (better on 8 of 11
+papers, worse on 3). Against the generator's planted true topics, which the app cannot see, the
+ensemble scored 0.731 and frequency 0.734, a difference of -0.003 ± 0.016, so the demo shows no
+improvement over frequency there. Part of the gain against mapped labels comes from the semantic
+component, which shares the alignment's systematic choices. On simulated courses with known
+outcomes (measured with the engine before version 2.1), in-sample backtests put the ensemble
+0.016-0.08 above frequency at 3-20 papers. Scored strictly on the next paper, the gain is small:
+-0.008 to +0.032. See [Low-data inference](docs/LOW_DATA_INFERENCE.md#8-results).
+
+Version 2.1 moved the demo numbers slightly (the ensemble scored 0.717 before). Paraphrase
+detection no longer links a short-note title to a longer question just because its words appear
+inside it, and that changes one model input. The Syllabus Explorer and the new prediction cards
+change how results are shown, not how topics are ranked.
 
 * The general model alone scored highest, but you can only pick it in hindsight. The app compares
   the ensemble with the best single method chosen on earlier papers: the ensemble led by
-  +0.010 ± 0.018, so it stays the final ranking.
+  +0.004 ± 0.019, so it stays the final ranking.
 * Syllabus alignment put 131 of 140 in-syllabus questions (93.6%) on the right topic with the
   default hybrid of the pretrained model and TF-IDF. When it aligns a paper, the feedback pass uses
   questions from earlier papers only. All 4 questions from an old syllabus were marked "outside" and
@@ -111,16 +150,23 @@ See [Low-data inference](docs/LOW_DATA_INFERENCE.md#8-results).
   outside the two-sided 95% t-interval). The app labels the other steps "not reliable" instead of
   hiding them; adding recency to frequency, for example, lowered NDCG by 0.015 ± 0.008.
 * With 12 papers the run reports "Low-data advanced inference": the course logistic, random forest
-  and gradient boosting models run as LIMITED with 2-4% of the weight each. The label is wording
+  and gradient boosting models run as LIMITED with 2-6% of the weight each. The label is wording
   only; it switches nothing on or off.
-* Calibrated probabilities beat the base rate on 10 later held-out papers: Brier 0.191 vs 0.248,
-  a gain of 0.057 ± 0.005.
+* Calibrated probabilities (this run chose Platt scaling) beat the base rate on 10 later held-out
+  papers: Brier 0.193 vs 0.248, a gain of 0.055 ± 0.004. Each topic's probability is estimated on
+  its own and one paper covers several topics, so they do not add up to 100%: the 25 demo
+  probabilities sum to about 11.
+* Format guide: 15 topics get a generated practice question, 6 a real past numerical question and
+  4 none, each with the reason. Of 79 practice candidates checked (generated questions and past
+  numericals offered for reuse), 4 failed the topic check and 3 the semantic check. The 3 that
+  failed both were past numericals offered for a topic they do not fit.
 
 Your own course will give different numbers; the Model performance page shows them.
 
 ## Documentation
 
-* [User guide](docs/USER_GUIDE.md): installation, every screen, reading the results, troubleshooting.
+* [User guide](docs/USER_GUIDE.md): installation, every screen (including the Syllabus
+  Explorer and the prediction cards), reading the results, troubleshooting.
 * [Architecture and design analysis](docs/ARCHITECTURE.md): the specification review, contradictions
   and how they were resolved, pipeline, schema, backtesting, success metrics.
 * [Low-data inference](docs/LOW_DATA_INFERENCE.md): how the ranking engine works with two, five or
@@ -168,6 +214,10 @@ pip install -e ".[ocr,dev]"
 pytest                    # unit, integration and regression tests (several minutes; integration tests run full analyses)
 ```
 
+The suite has 133 tests. `tests/unit/test_topic_history.py`, `tests/unit/test_format_guide.py` and
+`tests/integration/test_explorer.py` cover the Syllabus Explorer; among other things they check
+that its counts equal the model's topic panel and the Predictions tab.
+
 ## Known limitations
 
 * OCR reads printed text well, equations poorly and handwriting badly. Such regions are flagged for
@@ -176,7 +226,7 @@ pytest                    # unit, integration and regression tests (several minu
   confidence interval is wider than most differences between methods. The app still ranks topics,
   shows wide rank ranges and says so.
 * On the demo course the ensemble does not beat plain frequency against the planted true topics
-  (+0.004 ± 0.017). Gains show up mostly in in-sample backtests on simulated courses, which are
+  (-0.003 ± 0.016). Gains show up mostly in in-sample backtests on simulated courses, which are
   only as realistic as their generators; next-paper gains there are small.
 * The general ranking model is trained on simulations. Until your library holds other real
   courses, it reflects generic examiner behaviour, not your institution's. Set
@@ -187,5 +237,21 @@ pytest                    # unit, integration and regression tests (several minu
   the nearest past question it found was on the same topic for 11, against 14 with character
   n-grams, so reworded repeats are matched by character n-grams and word overlap unless you
   download a sentence-transformer.
-* Predicted question formulations are examples of likely forms, not the exam's wording.
+* Practice questions show the general form of a question, not the exam's wording. Generated ones
+  are filled in from templates with syllabus and past-question phrases, so some read stiffly, and
+  4 demo topics have none in their suggested format (a lab experiment, and three derivation topics
+  for which no derivation built from their phrases passed the checks). For
+  numerical problems the app reuses a real past question word for word; it does not invent new
+  values.
+* Format suggestions are only as reliable as the format history. On the demo, the format a topic
+  was asked in most often before matched a format it was asked in next time 37% of the time; the
+  course-wide format mix matched 40% of the time.
+* Explorer counts depend on the automatic mapping. Probable (B) matches count at the default
+  strictness and are flagged. A mapping you correct shows at once as "not yet counted"; the counts
+  change after you re-analyse.
+* Text written during the analysis (format guides, priority reasons) changes only after a
+  re-analysis. The "Results out of date" banner tells you when one is needed.
+* Page images exist only for PDFs; for Word and text files the explorer shows the extracted text.
+  Concepts listed inside one syllabus line are not separate tree nodes, so they have no counts of
+  their own.
 * The [full list](docs/LOW_DATA_INFERENCE.md#11-limitations) is in the low-data inference document.

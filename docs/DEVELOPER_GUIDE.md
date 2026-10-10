@@ -1,6 +1,6 @@
 # Developer guide
 
-Read [ARCHITECTURE.md](ARCHITECTURE.md) first: it records the design decisions (D1 to D13) that
+Read [ARCHITECTURE.md](ARCHITECTURE.md) first: it records the design decisions (D1 to D18) that
 the code follows. The low-data engine replaced parts of D1 to D4: data-size gates, the
 one-standard-error rule as the way to pick the final model, Platt-only calibration and TF-IDF as
 the default embedding. [LOW_DATA_INFERENCE.md](LOW_DATA_INFERENCE.md) describes the current
@@ -74,6 +74,20 @@ predictor/
   cli.py           command-line entry point
 ```
 
+The Syllabus Explorer and the clearer Predictions tab added these modules:
+
+| Module | What it does |
+|---|---|
+| `analysis/topic_history.py` | builds the run's `topic_history` artifact (papers, questions, per-topic counts, timeline rows) from the same counted mappings as the topic panel |
+| `parsing/format_labels.py` | student-facing format labels (Definition, Explain, Derive, Numerical calculation, ...) and the format families they group into; display only, never a model input |
+| `prediction/format_guide.py` | the question format guide of one topic: suggested family, description, placeholder template, reason, alternatives and reliability |
+| `prediction/priority_reason.py` | one sentence saying why a topic has its priority, built only from recorded counts; `priority_word` shows old "Extremely High" runs as "Very high" |
+| `services/fingerprint.py` | the per-run data fingerprint, the freshness check and `ENGINE_VERSION` |
+| `services/explorer_service.py` | explorer course list, the tree with per-node stats, node detail, syllabus and question sources, PDF page images |
+| `app/routes_explorer.py` | HTTP routes for the explorer, freshness, sources and page images |
+| `ui/static/js/topic_panel.js` | the node panel shared by the explorer and the Predictions tab drawer: history, past questions, format guide, source, mapping correction, kind tags |
+| `ui/static/js/view_explorer.js` | the Syllabus Explorer view: tree, search, filters, sort, and the routes `#/explorer`, `#/course/{id}/explorer` and `#/course/{id}/explorer/{node}` |
+
 ## Data flow
 
 ```
@@ -82,11 +96,14 @@ SourceFile -> DocumentPage (text per page)
            -> CourseTopic tree (merged documents)               (IngestService)
 AnalysisService.run:
   load topics + included exams (order_index) + leaf questions
+  data_fingerprint                -> AnalysisRun.config["fingerprint_parts"] and data_fingerprint
   get_backend, get_pretrained     -> alignment backend (hybrid by default), WordLlama for semantics
   SyllabusAligner.align           -> QuestionTopicMapping (manual mappings kept; causal feedback)
   QuestionTypeClassifier          -> ExamQuestion.question_types (manual types kept)
+  format_labels, families_of      -> student-facing labels and families per question (display only)
   find_recurrence                 -> exact/paraphrase/concept links
   build_panel (topic, concept, unfiltered topic) + semantic soft evidence per paper
+  build_history, _check_history   -> topic_history (same counted mappings as the topic panel)
   general_model_for               -> general ranking model (shipped prior unless
                                      models.use_simulated_prior = false, + other real courses)
   BacktestEngine.run              -> ModelResult, BacktestFold, calibration, leakage audit
@@ -94,8 +111,14 @@ AnalysisService.run:
   topic_uncertainty               -> rank interval per topic
   run_ablation, syllabus_filter_check, run_type_forecast, backtest_families
   build_topic_predictions         -> Prediction (topic, concept, family layers)
-  generate_formulations + FormulationVerifier -> PredictedQuestion (verified formulations only)
-  discover_structure, coverage, charts, simulate_papers -> AnalysisArtifact (including "evidence")
+  _format_guides (build_format_guide) -> format guide per topic
+  generate_formulations + FormulationVerifier -> PredictedQuestion (verified formulations only,
+                                     in the order of the topic's format guide)
+  priority_reason                 -> one sentence per topic
+  discover_structure, coverage, charts, simulate_papers -> AnalysisArtifact (including "evidence"
+                                     and "topic_history")
+  _persist_results                -> Prediction.features gets "history", "format_guide",
+                                     "priority_reason"; AnalysisRun.engine_version = ENGINE_VERSION
   save_course_features, register_course_model -> course_feature_set, model_registry
 ```
 
@@ -175,6 +198,158 @@ Three subtler points (the first two are documented in ARCHITECTURE.md):
   `models.use_simulated_prior = false` there is no shipped prior: the general model is learned from
   other real courses alone, and with none of them the general component is UNAVAILABLE.
 
+Mapping corrections are labels, and they do not leak into earlier folds either: the causal
+alignment feedback uses earlier papers' first-pass automatic matches, never your corrections.
+`test_mapping_correction_marks_results_stale_and_updates_counts_without_leakage` corrects a
+question in the last paper, re-runs the analysis and checks that every backtest metric for earlier
+papers is unchanged to 1e-9.
+
+## Topic history, format guides and freshness
+
+The Syllabus Explorer and the Predictions tab show the same numbers because they read the same
+stored run. Every count comes from the run's `topic_history` artifact. Rank, priority, likelihood,
+the format guide and the priority reason come from the topic `Prediction` rows, which both views
+serialise with `results_service.prediction_dict`. Neither view recomputes results from the live data
+when a request arrives; unit and sub-topic counts are summed from the stored artifact. If you add a number to either view, store it with the run and read it from there.
+
+### The topic_history artifact
+
+`build_history` (`analysis/topic_history.py`) runs right after the topic panel is built, from
+exactly the question records that fill it. A question counts for a topic when one of its counted
+mappings (status A, and B at the default strictness, as `counts_for_prediction` decides) rolls up
+to the topic. Rank 1 is the primary topic and rank 2 the secondary one.
+
+| Key | Contents |
+|---|---|
+| `version` | artifact version (1) |
+| `usable_papers` | T, the number of papers in the analysis |
+| `papers` | one entry per usable paper in panel order: `index`, `exam_id`, `label`, `year` (null when undated), `session`, `file`, `file_id`, `provisional` (reasons its counts may be unreliable: unknown or low-confidence year, low-OCR pages, questions flagged for review) |
+| `excluded_papers` | papers left out of the analysis: `exam_id`, `label`, `year`, `kind` (`duplicate`, `undated` or `excluded`), `reason`, `duplicate_of` |
+| `missing_years` | calendar years between the first and last usable paper with no usable paper |
+| `undated_papers` | panel indexes of usable papers with no year |
+| `questions` | map from question id (as a string) to a compact record: `e` (paper index), `nodes` (counted mappings as `[node, rank, weight]`), `uncounted` (matches that do not count, as `[node, status, score]`), `status`, `manual`, `conf`, `labels`, `families`, `fmt` (the model's coarse format), `marks`, `rel` (`exact`, `paraphrase`, `concept` or `new`), `prev` (the earlier questions it relates to), `fam` (recurrence family key), `pc` (parse confidence), `review` |
+| `topics` | map from topic id (as a string) to `node_stats` for that topic, described below |
+| `course_families` | format families across every counted question of the course (`family`, `display`, `questions`, `papers`, `of_questions`); used only to infer a format for topics with no past question |
+
+Each `topics` entry holds `usable_papers`; `papers` (indexes where the topic appeared) and
+`exam_frequency` (how many); `question_frequency`, `primary_questions`, `secondary_questions` and
+`secondary_only_papers`; `per_paper` (question ids per paper) and `roles`; `first_index`,
+`last_index`, `last_label` and `last_year`; `recent_window` and `recent_hits` (the last 3 papers);
+`marks` (`known`, `min`, `max`, `median`, from primary questions); `labels` and `families`, each
+with `questions` and `papers`; `multi_label_questions`; `repetition` (counts of `exact`,
+`paraphrase`, `concept` and `new`); `uncounted_questions`; `probable_questions`; and `provisional`
+with up to 12 `provisional_reasons`.
+
+Rules the artifact follows:
+
+* Exam frequency counts a paper once however many of its questions hit the topic. Question
+  frequency counts every counted question.
+* `relation_of` compares a question with earlier papers only, so same-paper pairs never count as
+  repeats. A repeat or paraphrase link to a question of a different format family counts as the
+  same concept. A shared syllabus node is a shared concept only when it is finer than the topic
+  (`topic_modeling/families.py`).
+* A missing year or an excluded paper is missing data, never "not examined". `timeline` returns
+  them as rows of kind `missing` or `excluded`.
+* Counts are provisional when a contributing paper has reasons, a question has parse confidence
+  below 0.7 or is flagged, or at least half of the counted questions are probable (status B,
+  not manual) matches.
+* Units and sub-topics are not stored. The explorer computes their stats on request with
+  `node_stats`, counting each question once, and `node_index` limits the scan to questions mapped
+  below the node. On the demo the overview takes about 0.02 s and a node about 0.03 s; building the
+  history for 400 topics and 6,000 questions takes 0.09 s.
+
+`_check_history` in `services/analysis_service.py` must pass on every run. It compares each
+topic's `exam_frequency` with the column sum of `panel.Y` and its `question_frequency` with the
+column sum of `panel.n_questions`, and logs `history_mismatch` at ERROR level on any difference.
+A mismatch is a bug: the views would show numbers the model never used. If you change how the
+panel counts (strictness, roll-up, which papers are usable), change `build_history` the same way.
+`test_counts_match_the_model_panel_and_the_predictions_tab` checks the result end to end.
+
+Each topic's `Prediction.features["history"]` holds a compact copy (`_history_summary`) for the
+prediction cards, with the most common family as `top_format` and up to 6 labels.
+
+### The question format guide
+
+`AnalysisService._format_guides` calls `build_format_guide` for every topic during the run, using
+the topic's counted questions from `topic_history`, and stores the result in
+`Prediction.features["format_guide"]`. The guide is the only place the app states a format; the old
+evidence lines "Most common question format" and "Predicted format if it appears" were removed
+because they contradicted topics' own history.
+
+| Field | Meaning |
+|---|---|
+| `family`, `display` | suggested family: the one asked in the most papers containing the topic; ties go to more questions, then the more recent family, then `FAMILY_ORDER` |
+| `basis` | `history`, `weak_history`, `syllabus`, `course_pattern` or `none` |
+| `evidence` | `established` (basis `history`: the family in 2 or more papers, and certain matches, status A or manual, in at least 2 of them), `weak` (one paper, or resting on probable matches) or `inferred` (no past question: from the syllabus entry's kinds, else the course-wide mix) |
+| `papers`, `questions`, `last_label` | the family's papers and questions for this topic, and the paper it last appeared in |
+| `topic_papers`, `usable_papers` | papers containing the topic, and T |
+| `description` | one specific sentence built from the topic's representative question in that family (primary role first, then certain matches, then the most recent), or from the syllabus wording when there is none |
+| `template` | numerical and design families only: `text` with every value replaced by a named `[placeholder]`, `placeholders` (`name`, `unit`, `example`), `source` and `note`; null when no value was found |
+| `illustrative` | the practice question. For numerical and design families it is the real past question word for word (`basis: "past_values"`, with `source`, and `probable_match` when the link is status B). Otherwise `_attach_illustrative` attaches a verified generated formulation (`basis: "generated"`), or leaves null and sets `illustrative_note` |
+| `marks_note` | the marks of the topic's primary past questions in that family |
+| `why` | the reason with its counts; states ties as ties and says when counts overlap |
+| `alternatives` | up to two more families from the same order, each with `description`, `support` and, where it applies, `template` and `illustrative` |
+| `reliability` | `topic_history`, `course_mix`, `folds` and `text` from the format forecast backtest (on the demo, over 11 earlier papers, the topic's most frequent past format matched a format it was asked in 37% of the time, and the course-wide mix 40%) |
+
+A past numerical question shown with its values must pass the same topic check as a generated
+question (`FormulationVerifier.check` through the `accept` callback). The app never invents new
+values, because it cannot check that they give a solvable problem.
+
+`priority_reason` (`prediction/priority_reason.py`) builds the "why this priority" sentence from
+recorded facts only: appearances, the last 3 papers, last appearance, syllabus match strength and
+secondary-only appearances. For a topic that never appeared it says there is no historical
+evidence in the T usable papers and that missing from past papers is not evidence that the topic
+will not be examined. Never describe such a topic as unlikely or rarely tested.
+
+### Freshness and ENGINE_VERSION
+
+At the start of every run, `fingerprint.data_fingerprint` hashes five parts of the course data. The
+run stores them in `AnalysisRun.config["fingerprint_parts"]` and their combined hash in
+`AnalysisRun.data_fingerprint`.
+
+| Part | What it covers |
+|---|---|
+| `papers` | every paper except generated and simulated ones: id, included or not, order index, year, source, label, full marks |
+| `questions` | every question of those papers, included or not: text, marks, parent, leaf flag, optional flag, OR group, and question types only when you set them |
+| `mappings` | your manual mappings (question, topic, status, rank) |
+| `syllabus` | the topics of the current syllabus version: number, title, parent, concepts, excluded flag, kinds, hours, marks weight, order |
+| `settings` | `analysis_settings(settings)`: every section except `NON_ANALYSIS_SECTIONS` (`app`, `logging`, `server`, `ui`, `ocr`, `ingestion`, `quality`, `parsing`, `search`, `export`), with `data_dir`, `model_dir` and keys ending in `_dir` or `_path` removed |
+
+Automatic mappings and automatic question types are outputs of the analysis, so they are left out
+and re-running never makes a run look stale. `fingerprint.freshness(session, run, settings)`
+recomputes the parts, lists the ones that differ in `changed`, and adds `engine` when
+`run.engine_version` differs from `ENGINE_VERSION` (now `"2.1"`). It returns `run_id`, `checked`,
+`stale`, `changed` and `message`. A run made before change tracking has no stored parts, so
+`checked` is false and the explorer shows the message asking for a re-run. When `stale` is true,
+both tabs show "Results out of date" with the reasons and a "Re-analyse now" button. Nothing is recomputed in the background.
+
+Bump `ENGINE_VERSION` when a change alters what a run stores for the same data: counts in
+`topic_history`, format guides, priority reasons, practice questions, stored wording, or model
+scores. A change to the UI alone, which only reads stored fields, needs no bump. When you add a
+setting that cannot change an analysis's results, put it in a section listed in
+`NON_ANALYSIS_SECTIONS`, or add its section there; otherwise changing it marks every run out of
+date. When you add a stored input that does change results, add it to the matching part in
+`data_fingerprint`.
+
+### Mapping corrections
+
+`PUT /api/questions/{id}/mapping` calls `ReviewService.set_mapping(qid, topic_ids, status)`. The
+status is A, B or D; D with no topics marks the question outside the syllabus and is stored as one
+manual row with a null `topic_id`. Before it deletes the question's rows, `set_mapping` snapshots
+every automatic mapping (`_auto_snapshot`, the fields in `AUTO_FIELDS`) into the rank-1 manual
+row's `evidence["replaced_automatic"]`. A second correction carries the first snapshot over, so the
+original automatic mapping is never lost. `DELETE /api/questions/{id}/mapping`
+(`clear_manual_mapping`, the panel's "Use automatic mapping") removes the manual rows and, when no
+automatic row exists, re-creates the automatic rows from the snapshot. It skips snapshots of
+topics deleted since; the next analysis maps those questions again.
+
+The explorer shows a saved correction at once as "your correction, not yet counted": `_live_manual`
+and `_mapping_now` in `explorer_service.py` compare the live manual rows with what the run used.
+Counts and predictions change only after re-analysis, and the `mappings` part of the fingerprint
+marks the run out of date until then. The analysis now honours a manual "outside the syllabus"
+mark; earlier versions ignored it. `test_undoing_a_correction_restores_the_automatic_mapping`
+covers the undo.
+
 ## Adding a prediction model
 
 1. Subclass `models.base.BaseModel`. Set `name`, `display`, `family`, a `description` and
@@ -240,8 +415,8 @@ statuses (ACTIVE, LIMITED, DOWNWEIGHTED, UNAVAILABLE, REFERENCE) and the weight 
 [LOW_DATA_INFERENCE.md](LOW_DATA_INFERENCE.md), section 5. A single method becomes the final
 ranking only through `best_single`, and only when `best_single` beat the ensemble on the same
 held-out papers by more than the one-sided 95% t-bound (`ensemble.replace_confidence`). On the demo
-the ensemble scored 0.717 and `best_single` 0.707 (difference +0.010 ± 0.018), so the ensemble
-stayed. In 112 simulated backtests `best_single` never replaced it, and
+the ensemble scores 0.710 and `best_single` 0.707 (difference +0.004, standard error 0.019), so the
+ensemble stays. In 112 simulated backtests `best_single` never replaced it, and
 `test_selection_does_not_replace_the_ensemble_on_noise` checks that two equally good rankings lead
 to a replacement in fewer than 8% of 400 trials.
 
@@ -279,6 +454,51 @@ Add an entry to `config/taxonomy.json` with `id`, `label`, `format` (one of defi
 derivation, numerical, diagram, objective), `weight` and regex `patterns`. Users can do the same
 without touching the code by placing a `taxonomy.json` in their data folder.
 
+The student-facing format label comes from `TYPE_LABELS` in `parsing/format_labels.py`. Map the new
+type there (next section); otherwise its questions show only the labels their instruction verbs
+produce, or "Unclassified".
+
+## Adding a format label or family
+
+Format labels and families are display only. The models read the classifier's coarse `format`,
+never the labels, so adding one changes no backtest number. It does change the format guides a run
+stores, so bump `ENGINE_VERSION` (see "Freshness and ENGINE_VERSION").
+
+To add a label:
+
+1. Add its id and display name to `LABELS` in `parsing/format_labels.py`. The dict order is the
+   display order.
+2. Make it reachable: map a classifier type to it in `TYPE_LABELS`, or add a pattern to
+   `VERB_LABELS`, which reads the instruction verbs in the question's own text. Items under "Write
+   short notes on" stay short notes (`format_labels` drops other labels for a short item with no
+   instruction verb), so check that your pattern does not fire on a bare item name.
+3. Add the id to the `labels` of one family in `FAMILIES`. The explorer's format table, timeline,
+   question items and format filter, and the format guide, all work in families. A question whose
+   labels fall in no family shows there as "Not classified".
+4. Add a case to `tests/unit/test_format_guide.py`
+   (`test_labels_read_the_instruction_and_allow_several` covers labels).
+
+To add a family:
+
+1. Add it to `FAMILIES` with `display` and `labels`, and place it in `FAMILY_ORDER`. That order
+   breaks ties between families asked in as many papers and questions (more specific first), and
+   `families_of` returns families in it. `families_of` drops `short_note` when a more specific
+   family applies.
+2. Set `FAMILY_GENERATOR_FORMAT[family]` to the generator format that illustrates it, or `None`
+   when no generator template fits. With `None` the guide shows no generated practice question and
+   says why.
+3. If a syllabus kind should imply the family for topics without history, add it to `KIND_FAMILY`.
+4. In `prediction/format_guide.py`, add a `FRAMES` sentence, an `OPENERS` pattern (strips the
+   instruction from a past question to find its object), a `FAMILY_CUES` pattern (picks the
+   sentence that asks for this format) and a `DEFAULT_VERBS` entry. Without them the guide falls
+   back to the verb "explain" and a bare "{verb} {obj}." sentence.
+5. A family whose questions carry values, like `numerical` and `design`, also needs its id where
+   `build_format_guide` and `_alternative` call `_numerical_parts`, and in the family set that
+   `_representative` sends through the topic check. Its practice question is then a real past
+   question that passed that check.
+6. Add tests to `tests/unit/test_format_guide.py`. The regression snapshot stores no guides, so it
+   does not change.
+
 ## Adding a file format
 
 Add an extractor returning `ingestion.types.ExtractionResult` and dispatch to it from
@@ -305,6 +525,12 @@ feature sets, which each run records in its config; scope "course": a run's cour
 `tests/fixtures/schema_v1.sql` holds the version 1 schema, and
 `test_migration_from_version_1_keeps_data` checks that a database built from it keeps its rows.
 
+The Syllabus Explorer needed no migration. The per-topic history summary, format guide and
+priority reason live in `prediction.features` (JSON), the full history in an `analysis_artifact`
+row with key `topic_history`, the fingerprint parts in `analysis_run.config`, and the replaced
+automatic mapping in the manual row's `question_topic_mapping.evidence`. New runs write
+`analysis_run.engine_version = "2.1"`.
+
 ## Configuration
 
 `config/default.toml` is the only place defaults live. `Settings` is read-only;
@@ -322,12 +548,18 @@ The low-data engine adds `embeddings.pretrained`, `embeddings.hybrid_pretrained_
 `ensemble.replace_confidence`), and sets `models.min_train_exams` to 1.
 [LOW_DATA_INFERENCE.md](LOW_DATA_INFERENCE.md), section 12, explains each one.
 
+Settings are part of each run's fingerprint, apart from the sections in
+`services/fingerprint.NON_ANALYSIS_SECTIONS` and any folder or file path. Put a setting that cannot
+change an analysis's results in one of those sections, so changing it does not mark runs out of
+date.
+
 ## Logging
 
 `utils.logging.log_event(logger, "event_name", key=value)` writes structured fields. The console
 shows warnings; `<data_dir>/logs/predictor.log` keeps INFO and above as JSON lines. Loggers:
 `predictor.ingestion`, `predictor.ocr`, `predictor.embeddings`, `predictor.evaluation`,
-`predictor.analysis`, `predictor.jobs`.
+`predictor.analysis`, `predictor.jobs`. A `history_mismatch` event on `predictor.analysis` means
+the topic history and the model's panel disagree (see `_check_history`); treat it as a bug.
 
 ## Tests
 
@@ -336,10 +568,13 @@ shows warnings; `<data_dir>/logs/predictor.log` keeps INFO and above as JSON lin
 | `tests/unit` | parsing formats, metadata, syllabus parsing and merge, text normalisation, quality flags, question types, metrics (hand-computed and against simulation), temporal statistics, hazard, rotation test, features, leakage audit, every component running on a 5-paper panel, the one-standard-error helper `select_model` kept for compatibility, calibration, generation grounding, structure, co-occurrence, format forecast, settings validation |
 | `tests/unit/test_low_data.py` | low-data behaviour on planted panels with 0 to 25 papers: every component runs at 2, 3, 5, 9, 15 and 18 papers, semantic, Bayesian and general components keep weight at 2 to 5 papers, course-learned models are downweighted at 3 papers and gain weight at 25, Bayesian intervals for 1 of 2 against 8 of 16, question counts do not change exam-level evidence, the leakage audit including meta models, later papers never changing earlier predictions (causal K, `test_later_papers_never_change_earlier_predictions`), semantic evidence capped per paper (`test_semantic_evidence_is_capped_per_paper`), input quality changing reliability (`test_input_quality_changes_component_reliability`), the ensemble not replaced on noise (`test_selection_does_not_replace_the_ensemble_on_noise`, under 8% of 400 trials), calibration rejecting uninformative scores (`test_calibration_rejects_scores_unrelated_to_outcomes`, at most 5% of 60 trials), the general component reported UNAVAILABLE without the simulated prior (`test_without_simulated_prior_the_general_model_is_reported_unavailable`), the low-data message, reproducibility, ranking with zero papers |
 | `tests/unit/test_repository_and_migrations.py` | the general model learns only from other real courses, other courses never change this course's history, the simulated prior can be turned off and each distinct general model gets one registry row (`test_simulated_prior_can_be_turned_off`), a version 1 database (`tests/fixtures/schema_v1.sql`) migrates and keeps its data |
+| `tests/unit/test_topic_history.py` | paper counts kept apart from question counts, secondary roles, sub-topic roll-up (a group counts each question once), the candidate index never changing a result, uncounted (status C) matches, missing years as missing data, excluded and duplicate papers, undated papers, multi-label formats, repetition classes (same-paper pairs ignored), provisional reasons, zero papers |
+| `tests/unit/test_format_guide.py` | format labels and families, numerical templates and placeholder naming (a value never takes another value's name or a quantity word that contradicts its unit), object phrases, a guide built from history, the topic check for past numerical questions, weak and inferred formats, priority wording for never-appeared topics, short-note items |
+| `tests/integration/test_explorer.py` | the tree shows every syllabus node, counts equal the model panel and the Predictions tab, identical prediction dicts, original wording and sources, a duplicate paper shown as excluded, group nodes without a prediction of their own, format counts, marginal probabilities shown only when calibrated, illustrative questions labelled and grounded and never history, never-appeared wording, source passages and page images, a mapping correction marking results stale and leaving earlier folds unchanged, excluded topics and papers, undo restoring the automatic mapping, a course with only a syllabus |
 | `tests/integration` | real PDF, scanned PDF (OCR), DOCX with Word numbering, images, duplicates; the full demo pipeline (alignment accuracy, out-of-syllabus handling, planted patterns, component statuses, exports, manual edits surviving re-analysis, generated material never counted as history, the evidence artifact, rank intervals and ablation metrics); a course with a syllabus and no papers (`test_course_with_a_syllabus_and_no_papers_still_gets_a_ranking`: full rank range, level High, no probability); the HTTP API |
 | `tests/regression` | a snapshot of the seeded demo run: parsing counts, mapping status counts, the final model (the ensemble) and whether it was calibrated, NDCG of every model, the top-10 ranking and categories |
 
-OCR tests skip automatically when the `tesseract` binary is missing.
+The full suite has 133 tests. OCR tests skip automatically when the `tesseract` binary is missing.
 
 After an intended behaviour change, refresh the regression snapshot and review the diff:
 
@@ -348,10 +583,20 @@ python tests/regression/snapshot_tools.py
 git diff tests/regression/snapshots/
 ```
 
-The snapshot last changed when alignment feedback became causal: the status counts moved to
-A 104 / B 30 / C 6 / D 4 and the ensemble's NDCG to 0.717. That refresh also took in the review
-fixes made since the previous snapshot (causal K, capped semantic evidence and others), so its diff
-is not the effect of causal feedback alone. "The leakage rule" above gives that effect.
+The snapshot last changed with the Syllabus Explorer work. Paraphrase detection had chained
+short-note titles into long questions, because `token_set_ratio` scores a title contained in a
+longer question as 100. `topic_modeling/families.py` now caps the ratio with `token_sort_ratio`
+when one question has fewer than half the distinct content terms of the other. That changes a model feature: the
+ensemble's NDCG moved from 0.717 to 0.710 and the course logistic's from 0.682 to 0.710, several
+categories changed, and "Extremely High Priority" became "Very High Priority". The status counts
+stayed at A 104 / B 30 / C 6 / D 4. In the ablation table, exact-repeat recall for the frequency
+stage fell from about 0.43 to about 0.17 because repeat families are no longer chained, so the
+target is finer; that is a change of definition, not lost accuracy.
+
+History: the refresh before that one came with causal alignment feedback, which moved the status
+counts to A 104 / B 30 / C 6 / D 4 and the ensemble's NDCG to 0.717 at the time. It also took in
+the review fixes made since the previous snapshot (causal K, capped semantic evidence and others),
+so its diff is not the effect of causal feedback alone. "The leakage rule" above gives that effect.
 
 The integration tests score models against the app's own mapped labels. When one of them shows the
 final ranking ahead of frequency, it says nothing about the true topics (see Conventions).
@@ -369,16 +614,22 @@ reference is at <http://127.0.0.1:8765/api/docs>. Main routes:
 | `GET /api/courses/{id}/exams`, `PATCH /api/exams/{id}` | paper metadata |
 | `GET /api/exams/{id}/questions`, `PATCH/DELETE /api/questions/{id}`, `POST .../split`, `POST .../merge-next` | question review |
 | `GET /api/courses/{id}/syllabus`, `POST /api/courses/{id}/topics`, `PATCH/DELETE /api/topics/{id}` | syllabus |
-| `GET /api/courses/{id}/mappings`, `PUT/DELETE /api/questions/{id}/mapping` | mapping overrides |
+| `GET /api/courses/{id}/mappings`, `PUT/DELETE /api/questions/{id}/mapping` | mapping overrides (PUT keeps the automatic mapping it replaces and DELETE restores it; see "Mapping corrections") |
 | `POST /api/courses/{id}/analyze`, `GET /api/runs/{id}` | run analysis, poll progress (the course needs syllabus topics; a run with zero papers is allowed and returns a ranking with full rank ranges and no probabilities) |
-| `GET /api/courses/{id}/results`, `GET /api/runs/{id}/predictions?layer=topic|concept|family` | latest run with its predictions and the `excluded`, `sufficiency` and `evidence` artifacts (`evidence` is null for runs from the earlier engine, and the UI then asks you to rerun); each topic prediction carries `evidence_strength` and `uncertainty` (rank interval and level) |
+| `GET /api/courses/{id}/results`, `GET /api/runs/{id}/predictions?layer=topic|concept|family` | latest run with its predictions and the `excluded`, `sufficiency` and `evidence` artifacts (`evidence` is null for runs from the earlier engine, and the UI then asks you to rerun); `results` also returns `freshness`; each topic prediction carries `evidence_strength`, `uncertainty` (rank interval and level), `history` (compact counts), `format_guide`, `priority_reason` and `priority` (Very high, High, Moderate or Low) |
+| `GET /api/explorer/courses` | courses with node count, papers included, latest run and its freshness |
+| `GET /api/courses/{id}/explorer` | the tree: every syllabus node with compact stats and a compact prediction, plus `run`, `freshness`, `papers`, `usable_papers`, `excluded_papers`, `missing_years`, `roots` and `families` |
+| `GET /api/courses/{id}/explorer/nodes/{node}` | node detail: `node` (with path and source refs), `stats`, `timeline`, `questions`, `uncounted`, `children`, `prediction` (the same `prediction_dict` as the Predictions tab), `child_predictions` or `parent_prediction` for groups and sub-topics, `formulations`, `related`, `freshness`, `calibrated`; `history_available` is false, with a `message`, when the run has no `topic_history` |
+| `GET /api/courses/{id}/freshness` | whether the latest run still matches the course data, and what changed |
+| `GET /api/topics/{id}/source`, `GET /api/questions/{id}/source` | a syllabus entry's source passages (file, page, line, passage), or a question's original and extracted wording with file, page, line and page text |
+| `GET /api/files/{id}/pages/{n}/image?highlight=...` | a PDF page rendered as PNG with PyMuPDF (a core dependency) and the passage marked; the `X-Highlight-Top` and `X-Highlight-Bottom` headers give its position as fractions of the page height |
 | `GET /api/runs/{id}/topics/{topic_id}` | evidence for one topic |
 | `GET /api/runs/{id}/models` | backtest table: role, scope, status, weight, reliability and metrics of every visible model, plus per-fold metrics |
-| `GET /api/runs/{id}/artifacts/{key}` | stored artifacts: `evidence`, `ablation`, `calibration`, `charts`, `structure`, `coverage`, `papers` ... |
+| `GET /api/runs/{id}/artifacts/{key}` | stored artifacts: `evidence`, `topic_history`, `ablation`, `calibration`, `charts`, `structure`, `coverage`, `papers` ... |
 | `GET /api/runs/{id}/artifacts/evidence` | `mode` and `message` (run level), `profile` (evidence profile), `components` (status table with reason, weight, reliability, skill, df), `validation` (held-out papers, fold spread, 95% t-interval of the final ranking's mean metric, baselines), `general_model` (source, real courses and rows used, fingerprint), `uncertainty` (jackknife replicates, posterior draws, components held fixed, level counts, median rank range, overall level), `evidence_quality`, `ensemble` (member weights, reliability, skill and folds, excluded components with reasons, whether it is final), `generation_checks`, `synthetic_course`, `notes` |
 | `POST /api/runs/{id}/papers` | new predicted-paper variants |
 | `GET /api/courses/{id}/search?q=...` | search |
-| `GET /api/runs/{id}/export?format=pdf|xlsx|csv|json` | export (the JSON export includes the `evidence` artifact) |
+| `GET /api/runs/{id}/export?format=pdf|xlsx|csv|json` | export (the JSON export includes the `evidence` artifact; the predictions table has `suggested_format`, `format_basis`, `format_description`, `why_this_format` and `priority_reason` columns; practice questions carry the label ILLUSTRATIVE PRACTICE QUESTION) |
 | `GET /api/health` | app version, OCR status, embeddings (including whether the bundled pretrained model loaded) |
 
 The `sufficiency` artifact keeps its old key for older clients. It now holds the same component
@@ -401,8 +652,25 @@ UNAVAILABLE.
   simulated courses the in-sample backtest puts the ensemble 0.03-0.08 NDCG above frequency
   (planted generator), but on the next paper alone the gain lies between -0.008 ± 0.012 and
   +0.032 ± 0.012 and is clearly positive only at 5 papers. On the 12-paper demo course the ensemble
-  scores NDCG@11 0.717 ± 0.027 against the app's own mapped labels, above plain frequency
-  (0.678 ± 0.024; paired difference +0.039 ± 0.019) and below the general model alone
-  (0.730 ± 0.022). Against the generator's true topics it scores 0.738 ± 0.025 and frequency
-  0.734 ± 0.020 (difference +0.004 ± 0.017), so the demo shows no gain over frequency there.
-  Section 8 of [LOW_DATA_INFERENCE.md](LOW_DATA_INFERENCE.md) reports both measurements.
+  scores NDCG@11 0.710 ± 0.026 against the app's own mapped labels, above plain frequency
+  (0.678 ± 0.024; paired difference +0.033 ± 0.019, better on 8 of the 11 held-out papers and
+  worse on 3) and below the general model alone (0.730 ± 0.022). The course logistic scores 0.710
+  and the best single method chosen on earlier papers 0.707. Against the generator's true topics
+  the ensemble scores 0.731 and frequency 0.734 (difference -0.003 ± 0.016), so the demo shows no
+  gain over plain frequency there. Calibration is valid on the demo (Platt on this run): Brier
+  0.193 against 0.248 for the base rate. The leakage audit passes for all 34 models. Section 8 of
+  [LOW_DATA_INFERENCE.md](LOW_DATA_INFERENCE.md) reports both measurements.
+* The Syllabus Explorer, the prediction cards, format labels, format guides and priority reasons
+  are display only and did not change accuracy. The demo numbers above moved from the previous
+  version (ensemble 0.717) because of an engine change, the paraphrase fix described under Tests,
+  not because of the interface. Do not describe interface work as an accuracy gain.
+* Both tabs read the stored run. Never compute a count in a view that the topic panel did not use,
+  and keep `_check_history` passing.
+* A topic missing from every past paper has no historical evidence. Never describe it as unlikely
+  or rarely tested.
+* Tag every value the panel shows with what it is (`kindTag` in `topic_panel.js`: fact, estimate,
+  model, input, illustrative, inferred, weak). The Bayesian recurrence rate is a model input,
+  never the likelihood. Show a probability only when the run's calibration is valid, and say that
+  topic probabilities are marginal and do not add up to 100%.
+* Label every generated practice question as illustrative. For numerical problems show a real past
+  question word for word, never invented values.

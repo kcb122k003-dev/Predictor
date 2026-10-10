@@ -13,6 +13,13 @@ changes in sections 4, 7, 9, 10, 12 and 13. For how the ranking engine
 works with two, five or fifteen papers, and for the full measurements, read
 [Low-data inference](LOW_DATA_INFERENCE.md).
 
+The Syllabus Explorer release (engine version 2.1) added the Syllabus Explorer tab, clearer
+prediction cards with a question format guide, change tracking and a fix to paraphrase
+detection. Section 16 describes the design and its decisions (D14 to D18). Sections 4, 5, 6,
+7, 9, 10, 14 and 15 were updated, and notes marked **Revised in the Syllabus Explorer release**
+change D7, D8 and D12. The paraphrase fix changed the repeat features the models read, so the demo
+results in section 15 moved; the interface work changed no model number.
+
 ---
 
 ## 1. Reading of the specification
@@ -47,12 +54,12 @@ The specification is long, but most of it reduces to five engineering problems:
 | D4 | Backtests on very few exams. With 5 exams and 3 warm-up exams you get 2 folds; a metric averaged over 2 folds is close to noise. | The backtest reports the standard error for every metric and the number of folds. Model selection uses the one-standard-error rule, which prefers the simpler model when the gap is inside the noise. Below 4 exams, no backtest runs and the app uses transparent statistics only.<br><br>**Revised in the low-data upgrade:** there is no minimum number of exams for backtesting. The backtest is rolling-origin over every fold: with T papers, papers 2 to T are each predicted from the papers before them, which gives T − 1 folds (`models.min_train_exams` defaults to 1). One paper gives no fold, and the app says accuracy cannot be measured yet. Each report gives the number of folds, the fold-to-fold standard deviation, a 95% t-interval for the mean metric, and paired comparisons with random, frequency, recency-frequency and Bayesian recurrence. The one-standard-error rule no longer chooses the final ranking; it survives only in the question-type forecast (layer 2) and in `select_model`, a compatibility function the analysis no longer calls. The evidence-aware ensemble is the final ranking unless `best_single` beat it on the same held-out papers beyond a one-sided 95% t-bound of the paired differences (`ensemble.replace_confidence`, default 0.95). `best_single` is an out-of-sample selector: for each held-out paper it uses the method that did best on the papers before it, so its score is not inflated by picking the winner after seeing every fold. Tuned variants (decay, window, half-life, Bayesian recency discount) keep their default unless another variant is ahead on earlier folds beyond a one-sided 95% t-bound. |
 | D5 | Using the **current** syllabus to backtest **old** exams leaks a small amount of future knowledge (the candidate set is defined with today's syllabus). | Unavoidable unless historical syllabi are supplied. The data model supports syllabus versions; when a historical version exists it is used for that period. The backtest report states which syllabus each fold used. |
 | D6 | "Detect rotation cycles" and "examiner tendencies". Ten observations rarely support a periodicity claim, and examiner identity is almost never printed. | Rotation is tested against a permutation null (shuffle the appearance positions, compare gap regularity). The app reports a rotation only if `p < 0.10` with at least three gaps. Examiner is an optional metadata field used for descriptive tables only, never as a predictive feature. |
-| D7 | "Generate plausible question formulations" vs "never introduce unsupported material". Free-form text generation cannot guarantee grounding. | Generation is template plus retrieval: templates come from the course's own historical question openers, slots are filled only with syllabus phrases, and a grounding checker rejects any output that contains a content word absent from the syllabus and the topic's historical questions. |
-| D8 | "Numerical data must be physically consistent". Checking units and physics for arbitrary courses is not possible without formula knowledge. | The app does not invent numbers. A predicted numerical question reuses a historical numerical question's structure verbatim and says so. |
+| D7 | "Generate plausible question formulations" vs "never introduce unsupported material". Free-form text generation cannot guarantee grounding. | Generation is template plus retrieval: templates come from the course's own historical question openers, slots are filled only with syllabus phrases, and a grounding checker rejects any output that contains a content word absent from the syllabus and the topic's historical questions.<br><br>**Revised in the Syllabus Explorer release:** a generated question is shown as an "Illustrative practice question - not a real exam question" and exported under the label "ILLUSTRATIVE PRACTICE QUESTION". It must also pass the topic, semantic and question-type checks (section 15 gives the demo counts). |
+| D8 | "Numerical data must be physically consistent". Checking units and physics for arbitrary courses is not possible without formula knowledge. | The app does not invent numbers. A predicted numerical question reuses a historical numerical question's structure verbatim and says so.<br><br>**Revised in the Syllabus Explorer release:** for numerical and design problems the practice question is a real past question, word for word, labelled "Past exam question to practise (paper, question)". It must pass the same topic check as a generated question, and a probable (status B) link is flagged. The format guide adds a template in which every value is a named placeholder, such as "[diameter in mm]", so you see the structure without invented values (D16). |
 | D9 | OCR of equations and handwriting. Tesseract reads printed text well, equations poorly, and handwriting badly. | Equation-like and low-confidence regions are flagged for review, and every question text is editable. Dedicated math OCR models are out of scope for this version because of their size. |
 | D10 | "Exam year" assumes one exam per year on the Gregorian calendar. Real data includes Bikram Sambat years (2076, 2079), regular and back exams in one year, and spring/fall sessions. | Time is an **exam sequence index**, not a calendar year. Each exam stores year, session, exam type and an editable `order_index`. Recency is measured in exam cycles. |
 | D11 | XGBoost, LightGBM and CatBoost are listed as candidates. They add large native dependencies and solve the same problem as scikit-learn's histogram gradient boosting at this data size. | Gradient boosting uses `HistGradientBoostingClassifier`. The model registry accepts more models later, but none of these is required. |
-| D12 | "High cosine similarity does not mean identical". | Exact-repeat detection requires both high embedding similarity and a high token-set string ratio. Paraphrase requires high similarity and the same syllabus topic. Thresholds live in configuration. |
+| D12 | "High cosine similarity does not mean identical". | Exact-repeat detection requires both high embedding similarity and a high token-set string ratio. Paraphrase requires high similarity and the same syllabus topic. Thresholds live in configuration.<br><br>**Revised in the Syllabus Explorer release:** the token-set ratio scores a text contained in a longer one as 100, so a short-note title such as "Continuity equation" was linked as a paraphrase of a long derivation question that mentions it, and repeat families were chained through such links. When the shorter text has fewer than half the distinct content terms of the longer one, the ratio is now capped at the token-sort ratio (`topic_modeling/families.py`). The exact- and paraphrase-repeat flags are model features, so this fix moved the demo results (section 15). A shared syllabus node now counts as the same concept only when it is finer than the topic. |
 | D13 | OR alternatives and "attempt any five". Does an optional question count as an appearance? | Yes for topic prediction: the examiner chose to put the topic on the paper. OR groups and optional instructions are stored, used by the structure model, and visible in the review screen. |
 
 ---
@@ -136,30 +143,36 @@ written into the analysis report. Details: [Low-data inference](LOW_DATA_INFEREN
 Everything runs on the user's machine. The browser talks only to `127.0.0.1`.
 
 ```
- ┌────────────────────────── Browser (localhost UI, no CDN) ───────────────────────────┐
- │  Courses · Files · Review · Syllabus · Mapping · Analyze · Predictions · Analytics   │
- │  Models · Paper simulation · Search · Export · Settings          (vanilla JS + Plotly)│
- └───────────────────────────────────────┬──────────────────────────────────────────────┘
-                                         │ JSON over HTTP (127.0.0.1 only)
- ┌───────────────────────────────────────┴──────────────────────────────────────────────┐
- │ app/        FastAPI routes, request schemas, background job runner                    │
+ ┌─────────────────────────── Browser (localhost UI, no CDN) ────────────────────────────┐
+ │  Courses · Files · Review · Syllabus · Mapping · Analyze · Predictions · Analytics    │
+ │  Syllabus Explorer · Models · Paper simulation · Search · Export · Settings · Help    │
+ │  topic_panel.js: one node panel for the Explorer and the Predictions drawer           │
+ │                                                           (vanilla JS + Plotly)       │
+ └────────────────────────────────────────┬──────────────────────────────────────────────┘
+                                          │ JSON over HTTP (127.0.0.1 only)
+ ┌────────────────────────────────────────┴──────────────────────────────────────────────┐
+ │ app/        FastAPI routes (core, review, results, explorer), background job runner   │
  ├───────────────────────────────────────────────────────────────────────────────────────┤
- │ services    course · ingestion · analysis orchestration · search · export             │
+ │ services    course · ingestion · analysis orchestration · results · explorer ·        │
+ │             fingerprint (freshness) · review (mapping corrections) · search · export  │
  ├───────────────┬──────────────────┬───────────────────────┬────────────────────────────┤
  │ ingestion/    │ parsing/         │ syllabus/             │ embeddings/                │
  │ ocr/          │  metadata        │  parser, merge        │  backends (tfidf, hybrid,  │
  │ preprocessing/│  exam_parser     │  alignment (A/B/C/D)  │   pretrained, neural)      │
  │               │  question_types  │                       │  cache, vector index       │
+ │               │  format_labels   │                       │                            │
  ├───────────────┴──────────────────┴───────────────────────┴────────────────────────────┤
  │ topic_modeling/ (question families, recurrence)   temporal/ (panel, hazard, rotation) │
- │ features/ (feature groups at a cutoff)            analysis/ (structure, coverage, co-occ)│
+ │ features/ (feature groups at a cutoff)                                                │
+ │ analysis/ (structure, coverage, co-occurrence, topic_history)                         │
  ├───────────────────────────────────────────────────────────────────────────────────────┤
  │ inference/ (hierarchical Bayesian recurrence, evidence profile, general ranking       │
  │             model, model repository, rank intervals)                                  │
  │ models/ (baselines, ensemble components, course logistic, GBM, RF, HMM,               │
  │          evidence-aware ensemble, calibration)                                        │
  │ evaluation/ (metrics, rolling-origin backtest, final choice, ablation)                │
- │ prediction/ (final ranking, categories, explanations, why-not, type prediction)       │
+ │ prediction/ (final ranking, categories, explanations, why-not, type prediction,       │
+ │              format_guide, priority_reason)                                           │
  │ generation/ (grounded formulations, verification, paper simulation)                   │
  ├───────────────────────────────────────────────────────────────────────────────────────┤
  │ database/ SQLite (SQLAlchemy) + FTS5 search index + embedding cache                   │
@@ -191,6 +204,10 @@ Design rules:
   A test perturbs future exams and asserts that earlier predictions do not change.
 * **Every number has a source.** Questions keep file, page and line; topics keep the
   source document and page; predictions keep the questions and features behind them.
+* **Views read stored results.** The Syllabus Explorer and the Predictions tab compute
+  nothing from the live data when a request arrives. They read the latest run's `topic_history` artifact and its
+  `prediction` rows, so they show the same numbers (D14). When the data changed after the run,
+  both say so instead of recomputing (D17).
 * **Manual edits win.** Any field a user edits is marked `user_edited` and is never
   overwritten by re-analysis.
 
@@ -211,6 +228,9 @@ questions × topics ──► alignment scores (semantic similarity, by default 
                    ──► (A and validated B only) incidence panel Y[t, k] with one row per exam,
                        marks, types, semantic soft evidence (spread from each question,
                        capped at 1 per paper and topic: 1 - prod(1 - share))
+                   ──► topic_history artifact from the same counted questions as the panel
+                       (paper and question counts, timeline, repetition classes, format
+                       families); _check_history logs an error if a count differs (section 16)
 
 panel ──► features at each cutoff t (frequency, recency, gaps, hazard, Bayesian posterior,
           semantic, marks, types, co-occurrence, syllabus weight, repeat behaviour, data quality)
@@ -224,6 +244,8 @@ panel ──► features at each cutoff t (frequency, recency, gaps, hazard, Bay
           validated, calibrated probability bands
       ──► explanations (component contributions, Bayesian posterior, semantic evidence, why-not)
       ──► layer 2: question-type forecast, recurring question families, verified grounded formulations
+      ──► per topic: question format guide, priority reason and a history summary, stored in
+          prediction.features (display only; no model reads them)
       ──► optional predicted papers built from the discovered exam template
 ```
 
@@ -296,11 +318,11 @@ version 2.
 | `exam_question` | id, exam_id, section_id, parent_id, label, path_label, depth, text, raw_text, normalized_text, context_text, marks, marks_source, or_group, is_optional, is_leaf, order_no, page_no, line_no, question_types, type_scores, type_user_edited, options, equations, quality_flags, parse_confidence, needs_review, user_edited |
 | `question_topic_mapping` | id, question_id, topic_id, rank, confidence, status (A/B/C/D), semantic_similarity, keyword_overlap, unknown_term_ratio, matched_terms, evidence_text, evidence, method (`auto` / `manual`) |
 | `embedding_cache` | key (sha256 of backend name + text), backend, dim, vector blob |
-| `analysis_run` | id, course_id, status, progress, message, started_at, finished_at, config, data_fingerprint, summary, **engine_version** (`2.0` for the low-data engine) |
-| `analysis_artifact` | id, run_id, key, data (charts, structure, coverage, ablation, calibration, evidence profile, model table, and more) |
+| `analysis_run` | id, course_id, status, progress, message, started_at, finished_at, config (including `fingerprint_parts`, the per-part hashes behind the freshness check), data_fingerprint, summary, **engine_version** (`2.0` for the low-data engine, `2.1` since the Syllabus Explorer release) |
+| `analysis_artifact` | id, run_id, key, data (charts, structure, coverage, ablation, calibration, evidence profile, model table, `topic_history`, and more) |
 | `model_result` | id, run_id, layer, model_name, display_name, family, complexity, enabled, gate_reason, selected, metrics, metric_se, notes, **role** (`baseline` / `component` / `ensemble`), **scope** (`course` / `syllabus` / `global`), **status** (ACTIVE / LIMITED / DOWNWEIGHTED / UNAVAILABLE / REFERENCE), **weight**, **reliability**, **evidence** (status reason, df, skill, fold spread, 95% interval) |
 | `backtest_fold` | id, run_id, layer, model_name, target_exam_id, target_index, target_label, n_train_exams, metrics |
-| `prediction` | id, run_id, layer, topic_id, item_key, label, rank, score, probability, prob_low, prob_high, calibrated, category, confidence, features, contributions, evidence, why_not, **evidence_strength** (Strong / Moderate / Limited / Minimal), **uncertainty** (rank interval and level) |
+| `prediction` | id, run_id, layer, topic_id, item_key, label, rank, score, probability, prob_low, prob_high, calibrated, category (Very High / High / Moderate / Low Priority, or Excluded), confidence, features (for topics also `history`, `format_guide` and `priority_reason`), contributions, evidence, why_not, **evidence_strength** (Strong / Moderate / Limited / Minimal), **uncertainty** (rank interval and level) |
 | `predicted_question` | id, run_id, topic_id, text, question_type, marks_low, marks_high, basis, rank, evidence_question_ids, grounding |
 | **`model_registry`** | id, scope (`global` / `course`), course_id, run_id, name, version, source (`simulation` / `simulation+repository` / `repository` / `none` for scope `global`, `course` for scope `course`), fingerprint, params, training, created_at |
 | **`course_feature_set`** | id, course_id, run_id, layer, is_synthetic, feature_names, n_rows, n_exams, X, y, created_at; one row per course and layer, replaced on each analysis; scale-free features only, no topic names or raw counts |
@@ -310,6 +332,14 @@ version 2.
 `model_result.enabled` and `model_result.gate_reason` are kept from version 1, because
 migrations never drop columns. No model is gated any more, so new runs store
 `enabled = true` and an empty reason; the component status and its reason take their place.
+
+The Syllabus Explorer release added no table and no column, so the schema stays at version 2.
+Its data lives in JSON columns that already existed: the `topic_history` artifact, three keys in
+`prediction.features`, and `fingerprint_parts` in `analysis_run.config`. A run made before the
+release has none of them. It has no stored fingerprint, so the app cannot tell whether the data
+changed since; the explorer says so and asks you to re-run the analysis.
+The category "Extremely High Priority" was renamed "Very High Priority"; `priority_word` shows
+old rows under the new name, so no stored row is rewritten.
 
 `model_registry` separates the two kinds of learned knowledge. Scope `global` holds one row
 per distinct general ranking model ever used, keyed by a fingerprint of the prior source and
@@ -355,6 +385,18 @@ package. Hash routes:
   semantically related past questions, source questions, syllabus location, verified
   formulations, and why-not notes for low-ranked topics. (Revised in the low-data upgrade;
   the original page showed data-sufficiency notes.)
+
+  *Revised in the Syllabus Explorer release:* each card now has separate fields: predicted
+  topic (with the full syllabus wording and its unit), priority (Very high, High, Moderate or
+  Low, and the rank), likelihood (a calibrated "x% chance of appearing (range a-b%)" or a
+  "Relative score (not a probability)"), historical support, and the general question format
+  from the format guide. A "Question format details" block holds the practice question, the
+  placeholder template, the reason, marks, reliability and up to two alternatives. Clicking a
+  card opens the explorer's node panel in a drawer, with the model evidence described above in a
+  collapsed block "How the model ranked it" and a link "Open in Syllabus Explorer".
+* `#/explorer` lists the courses; `#/course/:id/explorer` shows one course's syllabus tree
+  with search, filters and sort; `#/course/:id/explorer/:node` opens one node. *Added in the
+  Syllabus Explorer release*; section 16 describes it.
 * `#/course/:id/analytics` charts; clicking a point lists the underlying questions.
 * `#/course/:id/models` backtest table, per-fold chart, ablation, calibration, selection
   rationale, the evidence profile, validation on held-out papers (folds, spread, comparison
@@ -363,6 +405,10 @@ package. Hash routes:
 * `#/course/:id/search` keyword and semantic search.
 * `#/settings` thresholds, decay, strictness, OCR, embedding backend, and the checkbox "Use
   the simulated cross-course prior" (`models.use_simulated_prior`).
+* `#/help` explains the app, including the kind tags shown next to values (D18).
+
+The node panel (`ui/static/js/topic_panel.js`) is one module used by both the explorer and the
+Predictions drawer, so the two cannot drift apart in what they show.
 
 ---
 
@@ -432,7 +478,9 @@ pass switched back to all papers), causal feedback changed NDCG against mapped l
 -0.033, while coverage, logistic (+0.002) and random forest (+0.003) went up. Status counts
 moved from A 109 / B 27 / C 4 / D 4 to A 104 / B 30 / C 6 / D 4. The larger drop in the
 regression snapshot (ensemble 0.754 to 0.717) also includes other review fixes (causal K,
-capped semantic evidence, gate changes), so it is not due to causal feedback alone.
+capped semantic evidence, gate changes), so it is not due to causal feedback alone. These
+figures are history from engine 2.0; the paraphrase fix in engine 2.1 later moved the ensemble
+to 0.710 (D12 and section 15).
 
 ---
 
@@ -446,7 +494,7 @@ capped semantic evidence, gate changes), so it is not due to causal feedback alo
 | Question type | rule taxonomy (JSON, extensible) | no labelled data; user corrections stored for a future learned classifier |
 | Syllabus parsing and merge | deterministic + fuzzy matching | inspectable |
 | Alignment | hybrid of the bundled pretrained model and TF-IDF (or a downloaded sentence-transformer) + IDF keyword coverage + thresholds; feedback from earlier papers only | similarity is learned elsewhere; thresholds are explicit |
-| Families (exact / paraphrase) | similarity + string ratio thresholds | explicit and testable |
+| Families (exact / paraphrase) | similarity + string ratio thresholds; the string ratio counts only for texts of comparable length (revised in the Syllabus Explorer release, D12) | explicit and testable |
 | Frequency, recency, gaps, co-occurrence, structure | statistics | small data |
 | Bayesian recurrence, Markov, hazard | hierarchical beta-binomial and survival statistics with shrinkage; the gap hazard is used only when its prequential log score beats the simple rate | small data, pooled |
 | General ranking model | logistic regression trained on simulated courses, updated with other real courses (other real courses alone when `models.use_simulated_prior` is false) | needs no data from the course being predicted |
@@ -454,6 +502,10 @@ capped semantic evidence, gate changes), so it is not due to causal feedback alo
 | Calibration | Platt scaling or isotonic regression on out-of-sample predictions, chosen by nested log loss | probabilities shown only when the Brier gain over the base rate clears a one-sided 95% t-bound |
 | Ensemble weights | input quality × reliability × exp(2 × skill on earlier folds) × per-topic gate (revised; originally a rank average of members chosen on earlier folds) | no weights fitted by optimisation; skill is shrunk toward zero when there are few folds |
 | Question formulations | templates + retrieval + grounding check, then topic, semantic and question-type verification | guarantees no unsupported content |
+| Topic history (paper and question counts, timeline, repetition classes) | counting over the question records that fill the topic panel | the views must show the numbers the model used (D14) |
+| Format labels and families | rules on the classifier's types plus the question's own instruction verbs | display only; never a model input (D15) |
+| Question format guide | counting over the topic's history: the family asked in the most papers, ties broken by questions, then recency | you can check every count; each guide states how often this rule matched on earlier papers (37% on the demo, against 40% for the course-wide mix) |
+| Priority reason | sentence templates filled with recorded counts | states facts only; never calls a topic unlikely because it has not appeared |
 
 ---
 
@@ -585,6 +637,18 @@ simulated prior can be turned off, and that other courses never change a course'
 history. `tests/integration/test_end_to_end.py` runs a course with a syllabus and no papers
 end to end.
 
+The Syllabus Explorer release added three test files. `tests/unit/test_topic_history.py`
+checks paper and question counts, secondary roles, sub-topic roll-up, uncounted matches,
+missing years, excluded, duplicate and undated papers, multi-label formats, repetition
+classes, provisional reasons and a course with zero papers. `tests/unit/test_format_guide.py`
+checks labels, families, placeholder templates, guides built from history, the topic check on
+past numerical questions, weak and inferred formats, priority wording and short-note items.
+`tests/integration/test_explorer.py` runs the demo through the API and checks, among other
+things, that the explorer's counts equal the model's panel and the Predictions tab
+(`test_counts_match_the_model_panel_and_the_predictions_tab`), that a mapping correction marks
+the run out of date without changing any earlier backtest result, and that undo restores the
+automatic mapping. The full suite has 133 tests, and all pass.
+
 ---
 
 ## 15. Implementation status (as built)
@@ -617,6 +681,13 @@ end to end.
 | Schema migrations for existing databases, synthetic-data flags | `database/migrations.py`, `database/models.py` | done |
 | UI, charts with click-through, search, export, settings | `app/`, `ui/`, `search/`, `export/` | done |
 | Install scripts, CLI, docs, tests | `scripts/`, `cli.py`, `docs/`, `tests/` | done |
+| Syllabus Explorer: tree, search, filters, sort, node detail with history, past questions and sources | `services/explorer_service.py`, `app/routes_explorer.py`, `ui/static/js/view_explorer.js`, `ui/static/js/topic_panel.js` | done (section 16) |
+| One stored topic history for both tabs, checked against the model's panel | `analysis/topic_history.py`, `_check_history` in `services/analysis_service.py` | done |
+| Question format labels, families and the per-topic format guide | `parsing/format_labels.py`, `prediction/format_guide.py` | done; a numerical practice question is a real past question, never invented values (D16) |
+| Priority reason from recorded facts | `prediction/priority_reason.py` | done |
+| Freshness check and engine version | `services/fingerprint.py` | done; nothing is recomputed in the background (D17) |
+| Mapping correction from a past question, with undo | `PUT` and `DELETE /api/questions/{id}/mapping`, `services/review_service.py` | done; counts change after re-analysis |
+| Source passages, and PDF page images with the passage marked | `GET /api/topics/{id}/source`, `GET /api/questions/{id}/source`, `GET /api/files/{id}/pages/{n}/image` (PyMuPDF) | done; DOCX and TXT show extracted text only |
 | Examiner tendencies | `exam.examiner` field | stored and editable through the API only; no analysis, by design (D6) |
 | Historical syllabus per backtest fold | `SyllabusVersion` | partial: historical versions explain excluded questions; the current syllabus is the candidate set for every fold (D5) |
 | Learned question-type classifier from user corrections | none | future work |
@@ -625,10 +696,11 @@ end to end.
 
 ### Measured against the success metrics (synthetic demo, 12 papers)
 
-*Revised in the low-data upgrade.* These numbers come from the upgraded engine with default
-settings (hybrid alignment with causal feedback, evidence-aware ensemble). The full results,
-including simulated courses with known true topics, the staged ablation and the alignment
-backends, are in
+*Revised in the Syllabus Explorer release.* These numbers come from engine version 2.1 with
+default settings (hybrid alignment with causal feedback, evidence-aware ensemble). They
+replace the engine 2.0 numbers because the paraphrase fix (D12) changed the repeat features;
+the 2.0 values follow as "(2.0: ...)" where they moved. The full results, including simulated
+courses with known true topics, the staged ablation and the alignment backends, are in
 [Low-data inference, section 8](LOW_DATA_INFERENCE.md#8-results).
 
 | Target (section 12) | Result |
@@ -636,11 +708,11 @@ backends, are in
 | Segmentation on digital PDFs and DOCX | 144 of 144 demo questions found with correct marks across PDF, DOCX and text papers; fixture tests cover TU, KU and generic formats |
 | Year detection | 12 of 12 demo papers; fixture tests cover AD, BS and file-name years |
 | Alignment top-1 accuracy at least 85%, out-of-syllabus never A | 93.6% (131 of 140) with the default hybrid backend and causal feedback; all 9 misses have status B; 4 of 4 old-syllabus questions marked D; 0 in-syllabus questions marked D; status counts A 104 / B 30 / C 6 / D 4 |
-| Final ranking compared with the simple baselines | against the app's own mapped labels on 11 held-out papers: evidence-aware ensemble NDCG@11 0.717 ± 0.027, recent-window frequency 0.687, most frequent topics 0.678, random 0.456; ensemble minus frequency +0.039 ± 0.019, better on 9 of 11 papers, which is inside a two-sided 95% t-interval (±0.042), so it is not a reliable gain. The ensemble was kept: `best_single` scored 0.707 (difference +0.010 ± 0.018). Against the generator's planted true topics, which a real course cannot measure, the ensemble does **not** beat plain frequency: 0.738 against 0.734, difference +0.004 ± 0.017 |
-| Probabilities shown only when they beat the base rate | isotonic chosen over Platt by nested log loss; nested Brier 0.191 vs 0.248 base rate on 10 later papers (gain 0.057 ± 0.005, skill 23%), beyond the one-sided 95% bound, so probabilities are shown; expected calibration error 0.042 |
+| Final ranking compared with the simple baselines | against the app's own mapped labels on 11 held-out papers: evidence-aware ensemble NDCG@11 0.710 ± 0.026 (2.0: 0.717), recent-window frequency 0.687, most frequent topics 0.678, random 0.456; ensemble minus frequency +0.033 ± 0.019 (2.0: +0.039), better on 8 papers and worse on 3, which is inside a two-sided 95% t-interval (±0.042), so it is not a reliable gain. Course-specific logistic 0.710 (2.0: 0.682), general model 0.730. The ensemble was kept: `best_single` scored 0.707 (difference +0.004 ± 0.019). Against the generator's planted true topics, which a real course cannot measure, the ensemble does **not** beat plain frequency: 0.731 against 0.734, difference -0.003 ± 0.016 (2.0: +0.004 ± 0.017) |
+| Probabilities shown only when they beat the base rate | Platt chosen over isotonic by nested log loss (0.569 against 0.571; isotonic was chosen in 2.0); nested Brier 0.193 vs 0.248 base rate on 10 later papers (gain 0.055 ± 0.004, skill 22%), beyond the one-sided 95% bound, so probabilities are shown; expected calibration error 0.054 |
 | Leakage audit passes | passes for 34 models, including tuned variants and the ensemble |
-| No prediction or formulation outside the syllabus | asserted in `tests/integration/test_end_to_end.py`; 53 generated formulations checked, 2 rejected by verification (both reused past numericals filed under the wrong topic) |
-| A 15-paper course in under 60 s | 12 papers analysed in about 9 s on 4 cores (about 7 s before the upgrade), mostly tree models refitted on every fold; ingestion under 1 s for digital files |
+| No prediction or formulation outside the syllabus | asserted in `tests/integration/test_end_to_end.py`; 79 practice-question candidates checked (generated ones and reused past numericals), 4 rejected by the topic check and 3 by the semantic check (some fail both). A past numerical question offered for practice passes the same topic check. Of 25 demo topics, 15 have a generated practice question, 6 a past numerical question and 4 none, each with the reason |
+| A 15-paper course in under 60 s | 12 papers analysed in about 10 s on 4 cores (about 9 s with engine 2.0, about 7 s before the low-data upgrade), mostly tree models refitted on every fold; ingestion under 1 s for digital files. The explorer reads stored results: the course overview takes about 0.02 s and one node about 0.03 s |
 
 Part of the gain against mapped labels comes from the semantic component, which uses the
 same alignment scores that produce the labels. Gains over frequency are shown mainly on
@@ -649,4 +721,130 @@ beat frequency by 0.03 to 0.08 NDCG (2 to 20 papers, 8 courses per size), and th
 model alone was as good as or slightly better than the ensemble on those generators. On the
 next paper only (fit on T papers, score paper T + 1, 40 courses per size) the gain is small:
 between -0.008 ± 0.012 and +0.032 ± 0.012, and clearly positive only at T = 5. Simulated courses
-are only as realistic as their generators.
+are only as realistic as their generators. These simulated results were measured with engine
+2.0 and were not re-run for 2.1.
+
+What the paraphrase fix changed, measured on the demo: the ensemble against mapped labels fell
+from 0.717 to 0.710, its margin over frequency from +0.039 to +0.033 (8 papers better and 3
+worse, against 9 and 2), and the course-specific logistic model rose from 0.682 to 0.710.
+Against the true topics the ensemble moved from 0.738 to 0.731, so it still shows no gain over
+plain frequency (0.734). The calibrator chosen by nested log loss changed from isotonic to
+Platt. In the ablation table, exact-repeat recall for the frequency stage fell from about 0.43
+to about 0.17. That is a change of definition, not lost accuracy: short-note titles no longer
+chain repeat families together, so a "repeat" is a finer target. The leakage audit still
+passes for 34 models. The Syllabus Explorer, the cards and the format guide changed no model
+number; they only read what the run stored.
+
+---
+
+## 16. Syllabus Explorer and question format guide
+
+*Added in the Syllabus Explorer release (engine version 2.1).* The Syllabus Explorer is a
+top-level tab that shows the course's syllabus tree as parsed from the uploaded documents,
+and for any heading or entry its exam history, past questions, question formats and syllabus
+source. It reads the syllabus and papers already stored, so you upload nothing again. The
+Predictions tab got clearer cards and the same question format guide. Neither change touches
+the ranking models.
+
+### Data flow
+
+```
+AnalysisService.run
+  build_panel                 counted mappings only: status A, and B at the default strictness
+  build_history           ──► topic_history artifact, from the same question records as the panel
+  _check_history          ──► logs history_mismatch at ERROR if a topic's paper or question count
+                              differs from the panel
+  backtest, ranking, calibration, explanations (unchanged)
+  _format_guides          ──► format guide per topic (build_format_guide)
+  generate_formulations   ──► practice questions in the order of the topic's format guide, each
+   + FormulationVerifier      checked for syllabus, topic, semantic and question-type fit
+  priority_reason         ──► one sentence per topic, from recorded counts only
+  _persist_results        ──► prediction.features: history, format_guide, priority_reason
+                              analysis_run: engine_version "2.1", config.fingerprint_parts
+
+stored run
+  ──► GET /api/courses/{id}/results             prediction_dict per topic + freshness
+        ──► Predictions tab: cards, and the node panel in a drawer
+  ──► GET /api/courses/{id}/explorer            tree with per-node stats and compact predictions
+      GET /api/courses/{id}/explorer/nodes/{n}  stats, timeline, questions, uncounted matches,
+                                                children, prediction_dict, related questions
+        ──► Syllabus Explorer: tree pane and the node panel
+  ──► GET /api/courses/{id}/freshness           what changed since the run (both tabs)
+  ──► GET /api/topics/{id}/source, GET /api/questions/{id}/source,
+      GET /api/files/{id}/pages/{n}/image       syllabus passage, original question, PDF page
+```
+
+Both tabs render a node with the same module, `ui/static/js/topic_panel.js`. A group (unit)
+node adds up its topics' questions, counting each question once, and lists their predictions;
+it has no prediction of its own. A sub-topic gets its own counts and points to its topic's
+prediction. The stats for groups and sub-topics are computed on request from the stored
+artifact (`node_stats`), never from the live database.
+
+### Modules
+
+| Module | Role |
+|---|---|
+| `analysis/topic_history.py` | builds the `topic_history` artifact: papers, excluded papers, missing years, one compact record per question, per-topic counts, and the timeline rows |
+| `parsing/format_labels.py` | 16 student-facing format labels (plus "Unclassified") and the 9 format families they group into; display only |
+| `prediction/format_guide.py` | the format guide of one topic: suggested family, description, placeholder template, reason, marks, reliability and up to two alternatives |
+| `prediction/priority_reason.py` | the "why this priority" sentence, and `priority_word`, which shows old "Extremely High" rows as "Very high" |
+| `services/fingerprint.py` | the per-run data fingerprint, the freshness check and `ENGINE_VERSION` |
+| `services/explorer_service.py` | course list, tree with per-node stats, node detail, sources and PDF page images |
+| `services/results_service.py` | `prediction_dict`, the one serialiser both tabs use for a prediction |
+| `app/routes_explorer.py` | HTTP routes for the explorer, freshness, sources and page images |
+| `ui/static/js/view_explorer.js`, `ui/static/js/topic_panel.js` | the explorer view, and the node panel shared with the Predictions drawer |
+
+### Three counts kept apart
+
+* **Exam frequency**: usable papers with at least one counted question on the topic, out of
+  T usable papers. A paper with three questions on the topic counts once.
+* **Question frequency**: counted questions, with primary and secondary roles shown
+  separately.
+* **Repetition** of each question against earlier papers: exact or near-exact repeat,
+  paraphrase, same underlying concept, or new. Two questions in the same paper never count as
+  repeats.
+
+The timeline has a row for every usable paper (appeared yes or no), for calendar years with no
+usable paper ("No paper in the supplied data", never "No"), and for excluded papers with their
+reason. Counts that rest on low parse confidence, flagged questions, low-OCR pages, uncertain
+years or mostly probable (status B) matches are marked provisional, with the reasons.
+
+### Design decisions
+
+| # | Problem | Decision |
+|---|---|---|
+| D14 | One history source for both tabs. The explorer needs per-topic counts. Recounting them from the database on each request could disagree with what the model used (strictness, roll-up, which papers are usable) and would change as soon as you edit data. | `build_history` runs once per analysis, from exactly the question records that fill the model's topic panel, and the result is stored as the `topic_history` artifact. `_check_history` logs an error if any topic's paper or question count differs from the panel. Both tabs read this artifact and the same `prediction` rows through `prediction_dict`, so their numbers are identical (`test_counts_match_the_model_panel_and_the_predictions_tab`, `test_node_detail_reuses_the_same_prediction_and_original_wording`). |
+| D15 | Format families vs labels. The classifier's coarse formats are model inputs and too broad for a student, and one question often combines formats ("derive and explain with a diagram"). Sixteen labels would split a topic's few past questions into groups too thin to compare. | Each question gets several student-facing labels (Definition, Explain, Derive, Numerical calculation and so on), built from the classifier's types plus the question's own instruction verbs. Labels never change model inputs. Labels group into 9 families (for example Numerical problem, Derivation or proof, Conceptual explanation, Short note), and the explorer's format table, timeline, cards and the format guide all count families. Counts overlap when a question combines formats, and the page says so; ties are stated as ties. Items under "Write short notes on" stay short notes even when their name contains a format word. |
+| D16 | No invented numerical values. A numerical practice question needs values, and the app cannot check that invented values give a solvable problem (D8). | The format guide gives a template in which every value is a named placeholder ("a pipe of [diameter in mm] and [length in m]"). The practice question for a numerical or design family is a real past question, word for word, labelled "Past exam question to practise (paper, question)"; it must pass the same topic check as a generated question, and a probable match is flagged. Practice questions for other families are generated, labelled "Illustrative practice question - not a real exam question", and pass the syllabus, topic, semantic and question-type checks. The old evidence lines "Most common question format" and "Predicted format if it appears" were removed because they contradicted topics' own history; the format guide is now the only place a format is stated. |
+| D17 | Freshness fingerprint. Counts, format guides and reasons are written at analysis time. After you edit data they are out of date, and recomputing them on request would show numbers no model produced. | Each run stores hashes of five parts: papers (inclusion, year, order), questions (text, marks, optional flags, and types you set), your manual mappings, the syllabus, and the analysis settings. Automatic mappings and types are outputs, so they are left out, as are settings sections that cannot change results. The freshness check compares the parts and the engine version (now 2.1); when any differs, both tabs show "Results out of date", what changed, and a "Re-analyse now" button. Nothing is recomputed in the background. A mapping correction shows at once as "your correction, not yet counted" and keeps the automatic mapping it replaced, so "Use automatic mapping" restores it. Corrections are labels: the alignment feedback uses only earlier papers' automatic matches, so correcting a question in the last paper leaves every earlier backtest result unchanged (tested to 1e-9 on the demo). |
+| D18 | Kind tags. One page mixes counts, model outputs and generated text. Without labels a model input can be read as a probability, or an illustrative question as a real one. | Each value carries a kind tag: Historical fact, Statistical estimate, Model ranking, Model input (the Bayesian recurrence rate, never presented as the likelihood), Illustrative, Inferred, or Weak evidence. The Help page explains each tag. Likelihood is shown as a probability only when the run's calibration is valid, and otherwise as a relative score (position among the course's topics, 1 = top). Probabilities are marginal per topic, so they do not add up to 100%: across the 25 demo topics they sum to about 11. |
+
+The format guide's suggested family is the one asked in the most papers that contain the
+topic, with ties broken by questions and then recency. Its evidence is *established* (the
+family in 2 or more papers, and a certain match, status A or manual, in at least 2 of them),
+*weak* (one paper, or resting on probable matches) or *inferred* (no past question: from the syllabus entry's wording, else the
+course-wide mix). Each guide carries a reliability note: on 11 earlier demo papers, a topic's
+most frequent past format matched a format it was asked in 37% of the time, and the
+course-wide mix 40%. The priority reason uses only recorded facts. For a topic that never
+appeared it says there is no historical evidence in the T usable papers and that missing from
+past papers is not evidence that the topic will not be examined; it used to say "rarely
+tested". The category "Extremely High Priority" is now "Very High Priority".
+
+On the demo, 15 topics have a generated practice question, 6 a past numerical question and 4
+none (each says why), and 6 numerical templates were built. Building the history for 400
+topics and 6,000 questions takes 0.09 s.
+
+### Limitations
+
+* Past numerical questions are reused word for word for practice; the app does not invent new
+  values.
+* Generated practice questions are templates filled with syllabus and past-question phrases.
+  Some read stiffly, and 4 demo topics have none (lab experiments, and topics whose phrases
+  fail the checks).
+* Format suggestions are only as reliable as format history: 37% on the demo.
+* Counts depend on the automatic mapping. Probable (status B) matches count at the default
+  strictness and are flagged.
+* Format guides and reasons are written at analysis time and change only after a
+  re-analysis; the freshness banner says so.
+* Page images exist only for PDFs; DOCX and TXT show the extracted text. Concepts listed
+  inside a syllabus line are not separate nodes, so they have no counts of their own.
