@@ -15,6 +15,7 @@ from ..services.context import AppContext
 from .jobs import JobRunner
 from .routes_core import router as core_router
 from .routes_results import router as results_router
+from .routes_explorer import router as explorer_router
 from .routes_review import router as review_router
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "ui" / "static"
@@ -59,6 +60,7 @@ def create_app(ctx: AppContext | None = None, *, run_jobs_inline: bool = False) 
     app.include_router(core_router, prefix="/api")
     app.include_router(review_router, prefix="/api")
     app.include_router(results_router, prefix="/api")
+    app.include_router(explorer_router, prefix="/api")
 
     @app.get("/vendor/plotly.min.js", include_in_schema=False)
     def plotly_js():

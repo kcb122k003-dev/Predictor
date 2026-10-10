@@ -10,7 +10,9 @@ Formulations are assembled from three grounded parts and then checked:
 
 The grounding check rejects any formulation that contains a content word found neither in
 the syllabus subtree nor in the topic's historical questions. Every formulation is labelled
-"PREDICTED QUESTION FORMULATION" and lists the historical questions that shaped it.
+"ILLUSTRATIVE PRACTICE QUESTION" (an example of a likely format, never the actual exam wording) and
+lists the historical questions that shaped it. The order of formats follows the topic's format
+guide when one is given, so the first formulation illustrates the suggested format.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from ..config.settings import Settings
 from ..preprocessing.textnorm import content_terms
 from ..syllabus.tree import TopicTree
 
-LABEL = "PREDICTED QUESTION FORMULATION"
+LABEL = "ILLUSTRATIVE PRACTICE QUESTION"
 OPENER_PATTERNS = {
     "definition": [r"^(define)\b", r"^(what (?:is|are) meant by)\b", r"^(what do you (?:mean|understand) by)\b"],
     "derivation": [r"^(derive an expression for)\b", r"^(derive the expression for)\b", r"^(derive)\b",
@@ -80,11 +82,12 @@ class Formulation:
     label: str = LABEL
     rank: int = 0
     types: list[str] = field(default_factory=list)
+    kind: str = ""  # the format requested (compare is stored with format "theory")
 
     def as_dict(self) -> dict[str, Any]:
         return {"label": self.label, "text": self.text, "format": self.format, "marks_low": self.marks_low,
                 "marks_high": self.marks_high, "basis": self.basis, "evidence_question_ids": self.evidence_question_ids,
-                "grounding": self.grounding, "note": self.note, "rank": self.rank}
+                "grounding": self.grounding, "note": self.note, "rank": self.rank, "kind": self.kind}
 
 
 def harvest_openers(history: list[HistoricalQuestion]) -> dict[str, Counter]:
@@ -200,7 +203,8 @@ def _marks_range(history: list[HistoricalQuestion], fmt: str, course: list[Histo
 
 def generate_formulations(tree: TopicTree, topic_id: int, topic_history: list[HistoricalQuestion],
                           course_history: list[HistoricalQuestion], format_forecast: dict[str, float] | None,
-                          settings: Settings, limit: int | None = None, verifier=None) -> list[Formulation]:
+                          settings: Settings, limit: int | None = None, verifier=None,
+                          format_order: list[str] | None = None) -> list[Formulation]:
     limit = limit or int(settings.generation.formulations_per_topic)
     instruction = list(settings.alignment.instruction_words)
     openers = harvest_openers(course_history)
@@ -211,6 +215,8 @@ def generate_formulations(tree: TopicTree, topic_id: int, topic_history: list[Hi
     node = tree.nodes[topic_id]
     fmt_order = sorted((format_forecast or {}).items(), key=lambda kv: -kv[1])
     formats = [f for f, _ in fmt_order] or ["theory", "definition"]
+    if format_order:
+        formats = list(dict.fromkeys(list(format_order) + formats))
     hist_formats = {q.format for q in topic_history}
     diagram_style = any(re.search(r"sketch|diagram", q.text, re.IGNORECASE) for q in topic_history)
     assumption_style = any("assumption" in q.text.lower() for q in topic_history if q.format == "derivation")
@@ -233,8 +239,9 @@ def generate_formulations(tree: TopicTree, topic_id: int, topic_history: list[Hi
     for fmt in formats + ["theory", "definition", "compare"]:
         if len(out) >= limit:
             break
-        if any(f.format == fmt for f in out):
+        if any(f.kind == fmt for f in out):
             continue
+        kind = fmt
         text, basis, note, evidence = None, "template", "", same_format_evidence(fmt)
         if fmt == "numerical":
             past = [q for q in sorted(topic_history, key=lambda q: -q.exam_index) if q.format == "numerical"]
@@ -271,6 +278,12 @@ def generate_formulations(tree: TopicTree, topic_id: int, topic_history: list[Hi
             else:
                 text = f"{_opener(openers, 'theory')} {slot}."
             fmt = "diagram" if fmt == "diagram" else "theory"
+        elif fmt == "short_note":
+            slot = next_slot()
+            if not slot:
+                continue
+            text = f"Write a short note on {slot}."
+            fmt = "theory"
         elif fmt == "compare":
             pair = [s for s in slots if s not in used_slots and s.lower() != node.title.lower()][:2]
             if len(pair) < 2:
@@ -291,5 +304,6 @@ def generate_formulations(tree: TopicTree, topic_id: int, topic_history: list[Hi
                 continue
         lo, hi = _marks_range(topic_history, fmt, course_history)
         out.append(Formulation(text=text, format=fmt, marks_low=lo, marks_high=hi, basis=basis,
-                               evidence_question_ids=evidence, grounding=grounding, note=note, rank=len(out) + 1))
+                               evidence_question_ids=evidence, grounding=grounding, note=note, rank=len(out) + 1,
+                               kind=kind))
     return out

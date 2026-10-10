@@ -46,7 +46,8 @@ def latest_results(request: Request, course_id: int) -> dict[str, Any]:
     run_id = results.latest_run(course_id)
     if run_id is None:
         return {"run": None}
-    out = {"run": results.run(run_id), "predictions": results.predictions(run_id, "topic")}
+    out = {"run": results.run(run_id), "predictions": results.predictions(run_id, "topic"),
+           "freshness": results.freshness(course_id, run_id)}
     for key in ("excluded", "sufficiency", "evidence"):
         try:
             out[key] = results.artifact(run_id, key)

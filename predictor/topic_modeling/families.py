@@ -85,6 +85,7 @@ def find_recurrence(questions: list[FamilyQuestion], settings: Settings,
     texts = [q.text for q in questions]
     sims = similarity_matrix(texts, backend)
     norm = [normalize_for_matching(t) for t in texts]
+    sizes = [max(len(set(content_terms(t))), 1) for t in texts]
     uf = _UnionFind([q.question_id for q in questions])
     exact_prev: dict[int, list[int]] = {q.question_id: [] for q in questions}
     para_prev: dict[int, list[int]] = {q.question_id: [] for q in questions}
@@ -98,6 +99,11 @@ def find_recurrence(questions: list[FamilyQuestion], settings: Settings,
             if sim < min(cfg.concept_similarity, cfg.paraphrase_similarity) and (qi.concept is None or qi.concept != qj.concept):
                 continue
             ratio = float(fuzz.token_set_ratio(norm[i], norm[j]))
+            # token_set_ratio scores a subset as 100 ("Continuity equation" inside a long derivation question), so
+            # the string ratio only counts when the two questions are of comparable length.
+            balance = min(sizes[i], sizes[j]) / max(sizes[i], sizes[j])
+            if balance < 0.5:
+                ratio = min(ratio, float(fuzz.token_sort_ratio(norm[i], norm[j])))
             same_topic = qi.topic is not None and qi.topic == qj.topic
             same_concept = qi.concept is not None and qi.concept == qj.concept
             kind = ""

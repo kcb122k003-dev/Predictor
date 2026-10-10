@@ -14,6 +14,7 @@ from typing import Any
 from sqlalchemy import select
 
 from ..database.models import AnalysisRun, Course, PredictedQuestion
+from ..generation.questions import LABEL
 from ..prediction.ranking import DISCLAIMER
 from ..services.context import AppContext
 from ..services.results_service import ResultsService
@@ -38,7 +39,7 @@ class ExportService:
             forms = s.execute(select(PredictedQuestion).where(PredictedQuestion.run_id == run_id)
                               .order_by(PredictedQuestion.topic_id, PredictedQuestion.rank)).scalars().all()
             topic_label = {p["topic_id"]: p["label"] for p in preds}
-            form_rows = [{"topic": topic_label.get(f.topic_id, ""), "label": "PREDICTED QUESTION FORMULATION",
+            form_rows = [{"topic": topic_label.get(f.topic_id, ""), "label": LABEL,
                           "text": f.text, "format": f.question_type,
                           "marks": "" if f.marks_low is None else (f"{f.marks_low:g}" if f.marks_low == f.marks_high
                                                                    else f"{f.marks_low:g}-{f.marks_high:g}"),
@@ -62,7 +63,12 @@ class ExportService:
                 "total_appearances": f"{facts.get('appearances', '')}/{facts.get('exams', '')}",
                 "last_appearance": facts.get("last_label") or "never",
                 "typical_marks": "" if facts.get("marks_mean") is None else f"{facts['marks_min']:g}-{facts['marks_max']:g}",
-                "likely_format": tf.get("format", ""), "syllabus_match": _pct(facts.get("mapping_confidence")),
+                "suggested_format": (p.get("format_guide") or {}).get("display", tf.get("format", "")),
+                "format_basis": (p.get("format_guide") or {}).get("evidence", ""),
+                "format_description": (p.get("format_guide") or {}).get("description", ""),
+                "why_this_format": (p.get("format_guide") or {}).get("why", ""),
+                "priority_reason": p.get("priority_reason") or "",
+                "syllabus_match": _pct(facts.get("mapping_confidence")),
             })
             for line in p["evidence"]:
                 evidence_rows.append({"topic": p["label"], "kind": "evidence", "text": line})
@@ -239,7 +245,7 @@ class ExportService:
                 story.append(p(f"- {line}", small))
             forms = [f for f in tables["questions"] if f["topic"] == x["label"]]
             for f in forms[:3]:
-                story.append(p(f"PREDICTED QUESTION FORMULATION ({f['format']}, marks {f['marks'] or '?'}): {f['text']}", small))
+                story.append(p(f"{LABEL} ({f['format']}, marks {f['marks'] or '?'}): {f['text']}", small))
                 if f["note"]:
                     story.append(p(f"  {f['note']}", small))
         low = [x for x in preds if x["why_not"]][:8]

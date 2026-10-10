@@ -20,7 +20,7 @@ from ..models.base import percentile_rank
 from ..temporal import dynamics as dyn
 from ..temporal.panel import FORMATS, Panel
 
-CATEGORY_ORDER = ["Extremely High Priority", "High Priority", "Moderate Priority", "Low Priority", "Excluded"]
+CATEGORY_ORDER = ["Very High Priority", "High Priority", "Moderate Priority", "Low Priority", "Excluded"]
 DISCLAIMER = ("Exam prediction is probabilistic. It ranks topics by historical evidence and cannot guarantee "
               "which questions will appear.")
 
@@ -274,8 +274,9 @@ def _evidence_summary(facts: dict[str, Any], strength: str) -> str:
     T, a, nq = facts.get("exams", 0), facts.get("appearances", 0), facts.get("questions_total", 0)
     hist = {"Strong": "Strong", "Moderate": "Moderate", "Limited": "Sparse", "Minimal": "Very sparse"}.get(strength, strength)
     papers = f"{a} of {T} paper{'s' if T != 1 else ''}, {nq} question{'s' if nq != 1 else ''}"
-    if a == 0 and strength in ("Strong", "Moderate"):
-        text = f"{hist} historical evidence that it is rarely tested ({papers})"
+    if a == 0:
+        # A topic missing from every past paper is not shown as unlikely: there is simply no history for it.
+        text = f"No historical evidence (not found in any of the {T} usable paper{'s' if T != 1 else ''})"
     else:
         text = f"{hist} historical evidence ({papers})"
     mc = facts.get("mapping_confidence")

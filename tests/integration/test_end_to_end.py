@@ -151,7 +151,7 @@ def test_exports(analysed_demo):
     assert service.xlsx(run_id)[:2] == b"PK"
     csv_text = service.csv(run_id, "predictions").decode("utf-8-sig")
     assert csv_text.splitlines()[0].startswith("rank,topic,category")
-    assert b"PREDICTED QUESTION FORMULATION" in service.csv(run_id, "questions")
+    assert b"ILLUSTRATIVE PRACTICE QUESTION" in service.csv(run_id, "questions")
 
 
 def test_generated_material_never_counts_as_history(analysed_demo):

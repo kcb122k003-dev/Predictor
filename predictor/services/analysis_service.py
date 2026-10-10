@@ -8,9 +8,10 @@ Order of work:
  5. build the topic, concept and unfiltered panels
  6. backtest every candidate model, select, calibrate, audit leakage
  7. ablation and syllabus-filter check
- 8. format forecast, recurring question families, grounded formulations
+ 8. format forecast, recurring question families, per-topic history (the counts both the
+    Syllabus Explorer and the Predictions tab show), format guides, grounded formulations
  9. structure discovery, coverage, co-occurrence, charts, paper simulation
-10. persist everything with the run
+10. persist everything with the run, with a fingerprint of the data it read
 """
 
 from __future__ import annotations
@@ -29,24 +30,29 @@ import numpy as np
 from sqlalchemy import delete, select
 
 from ..analysis.coverage import cooccurrence, topic_coverage, unit_coverage
+from ..analysis.topic_history import ExcludedPaper, PaperInfo, QuestionInfo, build_history, relation_of
 from ..analysis.structure import ExamSummary, LeafInfo, MainQuestion, discover_structure
-from ..database.models import (AnalysisArtifact, AnalysisRun, BacktestFold, Course, CourseTopic, Exam, ExamQuestion,
-                               ModelResult, PredictedQuestion, Prediction, QuestionTopicMapping, SyllabusVersion)
+from ..database.models import (AnalysisArtifact, AnalysisRun, BacktestFold, Course, CourseTopic, DocumentPage, Exam,
+                               ExamQuestion, ModelResult, PredictedQuestion, Prediction, QuestionTopicMapping,
+                               SourceFile, SyllabusVersion)
 from ..embeddings.backends import get_backend, get_pretrained
 from ..embeddings.index import DbEmbeddingCache
 from ..evaluation.ablation import run_ablation, syllabus_filter_check
 from ..evaluation.backtest import BacktestEngine, BacktestReport
 from ..features.builder import GROUP_LABELS
 from ..generation.paper import simulate_papers
-from ..generation.questions import HistoricalQuestion, generate_formulations
+from ..generation.questions import HistoricalQuestion, generate_formulations, proper_nouns
 from ..generation.verify import FormulationVerifier
 from ..inference.evidence import build_profile, component_status, low_data_message
 from ..inference.generic import panel_rows
 from ..inference.repository import general_model_for, register_course_model, save_course_features
 from ..inference.uncertainty import topic_uncertainty
 from ..models.components import syllabus_share
+from ..parsing.format_labels import FAMILY_GENERATOR_FORMAT, families_of, format_labels
 from ..parsing.question_types import QuestionTypeClassifier
 from ..prediction.families import backtest_families, predict_families
+from ..prediction.format_guide import build_format_guide, clean_question, format_reliability
+from ..prediction.priority_reason import priority_reason
 from ..prediction.ranking import CATEGORY_ORDER, DISCLAIMER, build_topic_predictions
 from ..prediction.type_forecast import run_type_forecast
 from ..syllabus.alignment import (AlignmentResult, QuestionItem, SyllabusAligner, counts_for_prediction,
@@ -57,6 +63,8 @@ from ..temporal.panel import FORMATS, ExamInfo, Panel, QuestionRecord, build_pan
 from ..topic_modeling.families import FamilyQuestion, find_recurrence
 from ..utils.logging import get_logger, log_event
 from ..visualization.charts import build_charts
+from .fingerprint import combined as combine_fingerprint
+from .fingerprint import data_fingerprint
 from .context import AppContext
 from .syllabus_store import current_version, to_tree, topics_of
 
@@ -92,6 +100,13 @@ class Leaf:
     alignment: AlignmentResult | None = None
     counted: list[tuple[int, float]] = field(default_factory=list)  # (mappable node id, weight)
     status: str = "C"
+    ranks: dict[int, int] = field(default_factory=dict)  # counted node -> mapping rank (1 = primary)
+    uncounted: list[tuple[int, str, float]] = field(default_factory=list)  # (node, status, score) shown, not counted
+    page_no: int | None = None
+    line_no: int | None = None
+    needs_review: bool = False
+    labels: list[str] = field(default_factory=list)  # student-facing format labels
+    families: list[str] = field(default_factory=list)
 
 
 class AnalysisService:
@@ -179,36 +194,55 @@ class AnalysisService:
                               .order_by(Exam.order_index, Exam.id)).scalars().all()
             # With no past paper the ranking comes from the syllabus structure and the cross-course model
             # (and every topic is marked highly uncertain); there is no minimum number of papers.
-            infos, leaves, exam_rows = [], [], []
+            infos, leaves, exam_rows, papers = [], [], [], []
             for idx, e in enumerate(exams):
                 rows = s.execute(select(ExamQuestion).where(ExamQuestion.exam_id == e.id)
                                  .order_by(ExamQuestion.order_no)).scalars().all()
                 main_marks = _main_marks(rows)
                 total = e.full_marks or main_marks or 100.0
-                label = (e.structure or {}).get("label") or (f"{e.year} {e.session}".strip() if e.year else f"Exam {e.id}")
+                label = _exam_label(e)
                 infos.append(ExamInfo(e.id, e.order_index, label, float(total), e.year))
                 exam_rows.append((e, rows))
+                src = s.get(SourceFile, e.source_file_id) if e.source_file_id else None
+                papers.append(PaperInfo(idx, e.id, label, e.year, e.session or "", src.filename if src else None,
+                                        src.id if src else None, _paper_quality(s, e, src, rows)))
                 for q in rows:
                     if not q.is_leaf:
                         continue
-                    manual = [(m.topic_id, m.status) for m in q.mappings if m.method == "manual" and m.topic_id]
+                    # Manual mappings, including "outside the syllabus" (status D with no topic), override alignment.
+                    manual = [(m.topic_id, m.status) for m in sorted(q.mappings, key=lambda m: m.rank or 1)
+                              if m.method == "manual"]
                     leaves.append(Leaf(q.id, idx, e.id, q.text or "", q.context_text or q.text or "", q.marks,
                                        list(q.question_types or []), q.type_user_edited, list(q.options or []),
                                        q.path_label, manual,
                                        parse_confidence=float(q.parse_confidence if q.parse_confidence is not None
                                                               else 1.0),
-                                       optional=bool(q.is_optional or q.or_group)))
+                                       optional=bool(q.is_optional or q.or_group), page_no=q.page_no,
+                                       line_no=q.line_no, needs_review=bool(q.needs_review)))
+            excluded = []
+            for e in s.execute(select(Exam).where(Exam.course_id == course_id, Exam.include_in_analysis.is_(False),
+                                                  Exam.source.notin_(NON_HISTORICAL_SOURCES))
+                               .order_by(Exam.order_index, Exam.id)).scalars():
+                kind = "duplicate" if e.duplicate_of_id else "undated" if e.year is None else "excluded"
+                reason = e.exclusion_reason or ("Excluded from the analysis by you." if kind == "excluded" else "")
+                excluded.append(ExcludedPaper(e.id, _exam_label(e), e.year, kind, reason, e.duplicate_of_id))
             snapshot = [(e.id, e.order_index, e.structure, e.full_marks, e.duration,
                          [(q.id, q.parent_id, q.label, q.marks, q.or_group, q.is_optional, q.is_leaf, q.text, q.section_id)
                           for q in rows]) for e, rows in exam_rows]
-        return settings, tree, historical, infos, leaves, snapshot, synthetic
+            fingerprint = data_fingerprint(s, course_id, settings)
+        return settings, tree, historical, infos, leaves, snapshot, synthetic, papers, excluded, fingerprint
 
     # ------------------------------------------------------------------- main
     def _run(self, run_id: int, started: float) -> dict[str, Any]:
         with self.app.db.session() as s:
             course_id = s.get(AnalysisRun, run_id).course_id
         self._progress(run_id, 0.03, "Loading syllabus and papers")
-        settings, tree, historical, infos, leaves, snapshot, synthetic = self._load(course_id)
+        (settings, tree, historical, infos, leaves, snapshot, synthetic, papers, excluded_papers,
+         fingerprint) = self._load(course_id)
+        with self.app.db.session() as s:
+            run_row = s.get(AnalysisRun, run_id)
+            run_row.data_fingerprint = combine_fingerprint(fingerprint)
+            run_row.config = {**(run_row.config or {}), "fingerprint_parts": fingerprint}
         notes: list[str] = []
         cache = DbEmbeddingCache(self.app.db.new_session)
         backend, backend_note = get_backend(settings, cache)
@@ -226,12 +260,19 @@ class AnalysisService:
             q.alignment = r
             if q.manual:
                 q.status = q.manual[0][1]
-                q.counted = [(tid, RANK_WEIGHTS.get(i + 1, 0.33)) for i, (tid, st) in enumerate(q.manual)
-                             if counts_for_prediction(st, 1.0, "manual", settings, backend.kind) and tid in tree.nodes]
+                kept = [(i + 1, tid) for i, (tid, st) in enumerate(q.manual)
+                        if tid is not None and counts_for_prediction(st, 1.0, "manual", settings, backend.kind)
+                        and tid in tree.nodes]
+                q.counted = [(tid, RANK_WEIGHTS.get(rank, 0.33)) for rank, tid in kept]
+                q.ranks = {tid: rank for rank, tid in kept}
             else:
                 q.status = r.status
-                q.counted = [(m.topic_id, RANK_WEIGHTS.get(m.rank, 0.33)) for m in r.matches
-                             if counts_for_prediction(m.status, m.score, "auto", settings, backend.kind)]
+                kept = [m for m in r.matches if counts_for_prediction(m.status, m.score, "auto", settings, backend.kind)]
+                q.counted = [(m.topic_id, RANK_WEIGHTS.get(m.rank, 0.33)) for m in kept]
+                q.ranks = {m.topic_id: m.rank for m in kept}
+                # Matches shown for review but not counted (uncertain, status C, or below the strictness bar).
+                q.uncounted = [(m.topic_id, m.status if m.rank > 1 else r.status, float(m.score)) for m in r.matches
+                               if m not in kept and (m.status if m.rank > 1 else r.status) != "D"]
         hist_matches = self._historical_matches(settings, historical, backend, leaves)
         self._persist_mappings(leaves, hist_matches)
 
@@ -251,6 +292,8 @@ class AnalysisService:
                 q.format = classifier.format_of(q.types[0]) if q.types else "theory"
             if q.format not in FORMATS:
                 q.format = "theory"
+            q.labels = format_labels(q.text, q.types, q.marks, q.context if q.context != q.text else "")
+            q.families = families_of(q.labels)
         self._persist_types(type_updates)
 
         # 4. Recurrence ---------------------------------------------------------
@@ -280,6 +323,9 @@ class AnalysisService:
         for panel in (topic_panel, concept_panel, unfiltered_panel):
             panel.meta["semantic_source"] = getattr(backend, "name", "alignment")
             panel.meta["pretrained"] = pretrained is not None
+        # Per-topic history from the same counted mappings as the topic panel (checked against it below).
+        history = build_history(papers, excluded_papers, _question_infos(leaves, recurrence), tree.topic_of, topic_ids)
+        _check_history(history, topic_panel, topic_ids)
 
         # 6. Backtest ---------------------------------------------------------------
         self._progress(run_id, 0.38, "Backtesting every component on past exams")
@@ -368,7 +414,11 @@ class AnalysisService:
                                         lab_items={t for t in topic_ids if _is_lab(tree, t)}, uncertainty=uncertainty,
                                         semantic_evidence=semantic_evidence)
 
-        # Formulations for the topics worth revising first, each verified before it is kept.
+        # Format guide for every topic (what kind of question to prepare), from its own counted questions.
+        verifier = FormulationVerifier(tree, aligner, classifier, pretrained)
+        guides = self._format_guides(tree, topic_ids, leaves, infos, history, type_report, verifier)
+
+        # Illustrative practice questions for every topic, in the order of its format guide, each verified.
         history_by_topic: dict[int, list[HistoricalQuestion]] = defaultdict(list)
         course_hist: list[HistoricalQuestion] = []
         for q in leaves:
@@ -378,14 +428,19 @@ class AnalysisService:
                 course_hist.append(hq)
             for nid, _ in q.counted[:1]:
                 history_by_topic[tree.topic_of(nid)].append(hq)
-        verifier = FormulationVerifier(tree, aligner, classifier, pretrained)
         formulations: dict[int, list[dict[str, Any]]] = {}
-        wanted = [p for p in preds if p.category in CATEGORY_ORDER[:3]][:30] or preds[:10]
-        for p in wanted:
+        for p in preds:
             dist = type_report.per_topic.get(p.item_id, {}).get("distribution")
+            guide = guides.get(p.item_id) or {}
+            order = [FAMILY_GENERATOR_FORMAT.get(f) for f in [guide.get("family")]
+                     + [alt["family"] for alt in guide.get("alternatives", [])]]
             forms = generate_formulations(tree, p.item_id, history_by_topic.get(p.item_id, []), course_hist, dist,
-                                          settings, verifier=verifier)
+                                          settings, verifier=verifier, format_order=[f for f in order if f])
             formulations[p.item_id] = [f.as_dict() for f in forms]
+            _attach_illustrative(guide, formulations[p.item_id])
+        reasons = {p.item_id: priority_reason(category=p.category, rank=p.rank, topics=len(preds),
+                                              stats=history["topics"].get(str(p.item_id), {}), facts=p.facts,
+                                              guide=guides.get(p.item_id)) for p in preds}
 
         # 10. Structure, coverage, charts, papers -------------------------------------------
         self._progress(run_id, 0.88, "Analysing paper structure and coverage")
@@ -446,6 +501,9 @@ class AnalysisService:
                               "selection_rule": "evidence-aware ensemble unless a single method is reliably better",
                               "alignment_thresholds": th},
         }
+        topic_extras = {tid: {"history": _history_summary(history["topics"].get(str(tid), {})),
+                              "format_guide": guides.get(tid), "priority_reason": reasons.get(tid)}
+                        for tid in topic_ids}
         self._persist_results(run_id, settings, report, concept_report, preds, formulations, family_preds,
                               concept_panel, tree, recurrence, infos, {
                                   "charts": charts,
@@ -458,6 +516,7 @@ class AnalysisService:
                                   "families": {"backtest": families_bt, "predictions": family_preds},
                                   "papers": {"papers": papers, "structure_hypotheses": structure.hypotheses},
                                   "excluded": {"groups": excluded},
+                                  "topic_history": history,
                                   "rotation": {"items": [{"label": topic_panel.item_labels[k], **v}
                                                          for k, v in rotation.items()]},
                                   "sufficiency": sufficiency, "evidence": evidence,
@@ -466,12 +525,47 @@ class AnalysisService:
                                              "primary": report.primary, "targets": [infos[t].label for t in report.targets],
                                              "leakage_audit": report.leakage_audit, "validation": report.validation,
                                              "concept_table": concept_report.summary_table()},
-                              }, course_id=course_id, synthetic=synthetic, settings_snapshot=settings)
+                              }, course_id=course_id, synthetic=synthetic, settings_snapshot=settings,
+                              topic_extras=topic_extras)
         log_event(log, "analysis_done", run_id=run_id, seconds=summary["seconds"], selected=report.selected,
                   mode=mode)
         return summary
 
     # ------------------------------------------------------------- helpers
+    def _format_guides(self, tree: TopicTree, topic_ids: list[int], leaves: list[Leaf], infos: list[ExamInfo],
+                       history: dict[str, Any], type_report, verifier: FormulationVerifier) -> dict[int, dict[str, Any]]:
+        """The question format guide of every topic, from the questions counted for it in ``history``."""
+        leaf_by_id = {q.id: q for q in leaves}
+        reliability = format_reliability(type_report.accuracy)
+        names = proper_nouns([q.text for q in leaves])
+        out = {}
+        for tid in topic_ids:
+            stats = history["topics"].get(str(tid), {})
+            qs = []
+            for key, role in stats.get("roles", {}).items():
+                q = leaf_by_id.get(int(key))
+                if q is None:
+                    continue
+                qs.append({"id": q.id, "text": q.text, "labels": q.labels, "families": q.families, "marks": q.marks,
+                           "exam_index": q.exam_index, "exam_label": infos[q.exam_index].label,
+                           "path_label": q.path_label, "role": role})
+            node = tree.nodes[tid]
+            kinds = set(node.kinds)
+            concepts = list(node.concepts)
+            for d in tree.descendants(tid):
+                kinds |= set(tree.nodes[d].kinds)
+                concepts += list(tree.nodes[d].concepts)
+            def accept(q: dict[str, Any], tid: int = tid) -> bool:
+                # A past numerical shown with its real values must pass the same topic check as generated questions.
+                return bool(verifier.check(clean_question(q["text"]), tid, "numerical", "historical_variant")["passed"])
+
+            out[tid] = build_format_guide(topic_label=node.label(), topic_title=node.title, kinds=kinds,
+                                          concepts=concepts, stats=stats, questions=qs,
+                                          course_families=history.get("course_families", []),
+                                          papers=history["papers"], reliability=reliability, names=names,
+                                          accept=accept)
+        return out
+
     def _historical_matches(self, settings, historical, backend, leaves) -> dict[int, dict[str, Any]]:
         out: dict[int, dict[str, Any]] = {}
         weak = [q for q in leaves if q.status in ("C", "D") and not q.manual]
@@ -635,7 +729,7 @@ class AnalysisService:
     def _excluded_groups(self, leaves: list[Leaf], recurrence, infos, tree) -> list[dict[str, Any]]:
         groups: dict[str, list[Leaf]] = defaultdict(list)
         for q in leaves:
-            if q.status == "D" and not q.manual:
+            if q.status == "D":
                 groups[recurrence.family_of.get(q.id, f"q{q.id}")].append(q)
         out = []
         for key, qs in groups.items():
@@ -643,6 +737,8 @@ class AnalysisService:
             r = first.alignment
             nearest = tree.nodes[r.matches[0].topic_id].title if r and r.matches else None
             reason = r.reason if r else "Outside the current syllabus."
+            if first.manual:
+                reason = "Marked outside the syllabus by you."
             if r and r.unknown_terms:
                 reason += f" Terms not in the syllabus: {', '.join(r.unknown_terms[:6])}."
             out.append({"label": first.text[:160], "reason": reason, "nearest_topic": nearest,
@@ -653,7 +749,8 @@ class AnalysisService:
 
     def _persist_results(self, run_id, settings, report: BacktestReport, concept_report: BacktestReport, preds,
                          formulations, family_preds, concept_panel: Panel, tree, recurrence, infos,
-                         artifacts: dict[str, Any], *, course_id: int, synthetic: bool, settings_snapshot=None) -> None:
+                         artifacts: dict[str, Any], *, course_id: int, synthetic: bool, settings_snapshot=None,
+                         topic_extras: dict[int, dict[str, Any]] | None = None) -> None:
         with self.app.db.session() as s:
             run = s.get(AnalysisRun, run_id)
             run.engine_version = ENGINE_VERSION
@@ -684,7 +781,8 @@ class AnalysisService:
                     calibrated=p.calibrated, category=p.category, confidence=p.confidence,
                     features={"facts": _jsonable(p.facts), "signals_for": p.signals_for,
                               "relative_score": p.relative_score,
-                              "signal_contributions": {"values": p.signal_contributions, "source": p.signal_source}},
+                              "signal_contributions": {"values": p.signal_contributions, "source": p.signal_source},
+                              **_jsonable((topic_extras or {}).get(p.item_id, {}))},
                     contributions={"values": p.contributions, "source": p.contribution_source},
                     evidence={"lines": p.evidence}, why_not=p.why_not, evidence_strength=p.evidence_strength,
                     uncertainty=_jsonable(p.uncertainty)))
@@ -693,7 +791,8 @@ class AnalysisService:
                                             question_type=f["format"], marks_low=f["marks_low"],
                                             marks_high=f["marks_high"], basis=f["basis"], rank=f["rank"],
                                             evidence_question_ids=f["evidence_question_ids"],
-                                            grounding=_jsonable({**f["grounding"], "note": f["note"], "label": f["label"]})))
+                                            grounding=_jsonable({**f["grounding"], "note": f["note"], "label": f["label"],
+                                                                 "kind": f.get("kind")})))
             scores = concept_report.final_scores
             order = np.lexsort((np.arange(len(scores)), -scores))
             for rank, i in enumerate(order, start=1):
@@ -732,6 +831,104 @@ def report_topic_id(fam: dict[str, Any], preds) -> int | None:
         if p.item_index == col:
             return p.item_id
     return None
+
+
+def _exam_label(e: Exam) -> str:
+    return (e.structure or {}).get("label") or (f"{e.year} {e.session}".strip() if e.year else f"Exam {e.id}")
+
+
+BAD_PAGE_FLAGS = {"low_ocr_confidence": "low OCR confidence", "garbled_symbols": "garbled characters",
+                  "garbled_text_layer": "garbled text layer", "needs_ocr_but_unavailable": "scanned page without OCR",
+                  "empty_text": "page with no text", "implausible_words": "many implausible words"}
+
+
+def _paper_quality(session, exam: Exam, src: SourceFile | None, rows: list[ExamQuestion]) -> list[str]:
+    """Reasons a paper's counts may be unreliable (shown with every count it contributes to)."""
+    reasons = []
+    if exam.year is None:
+        reasons.append("year unknown; placed by its order in the list, not by date")
+    else:
+        conf = ((exam.metadata_confidence or {}).get("year") or {}).get("confidence")
+        if conf is not None and conf < 0.6 and "year" not in (exam.user_edited_fields or []):
+            reasons.append(f"year detected with low confidence ({conf:.0%})")
+    if src is not None:
+        bad: dict[str, list[int]] = defaultdict(list)
+        for page in session.execute(select(DocumentPage).where(DocumentPage.file_id == src.id)).scalars():
+            for flag in page.quality_flags or []:
+                if flag in BAD_PAGE_FLAGS:
+                    bad[flag].append(page.page_no)
+        for flag, pages in bad.items():
+            reasons.append(f"{BAD_PAGE_FLAGS[flag]} on page {', '.join(str(p) for p in sorted(set(pages)))}")
+    review = sum(1 for q in rows if q.is_leaf and q.needs_review)
+    if review:
+        reasons.append(f"{review} question(s) flagged for review")
+    return reasons
+
+
+def _question_infos(leaves: list[Leaf], recurrence) -> list[QuestionInfo]:
+    out = []
+    for q in leaves:
+        rel, earlier = relation_of(q.id, recurrence.exact_prev, recurrence.para_prev, recurrence.concept_prev)
+        out.append(QuestionInfo(
+            id=q.id, exam_index=q.exam_index,
+            nodes=[(nid, q.ranks.get(nid, i + 1), w) for i, (nid, w) in enumerate(q.counted)],
+            uncounted=list(q.uncounted), status=q.status, manual=bool(q.manual), confidence=_mapping_confidence(q),
+            labels=list(q.labels), families=list(q.families), format=q.format, marks=q.marks, relation=rel,
+            earlier=earlier, family_key=recurrence.family_of.get(q.id), parse_confidence=q.parse_confidence,
+            needs_review=q.needs_review))
+    return out
+
+
+def _check_history(history: dict[str, Any], panel: Panel, topic_ids: list[int]) -> None:
+    """The history must count exactly what the model saw; a mismatch is a bug, so it is logged loudly."""
+    for col, tid in enumerate(topic_ids):
+        st = history["topics"].get(str(tid), {})
+        papers = int(panel.Y[:, col].sum()) if panel.T else 0
+        questions = int(panel.n_questions[:, col].sum()) if panel.T else 0
+        if st.get("exam_frequency", 0) != papers or st.get("question_frequency", 0) != questions:
+            log.error("topic history differs from the panel", extra={
+                "event": "history_mismatch", "topic": tid, "history": [st.get("exam_frequency"),
+                                                                      st.get("question_frequency")],
+                "panel": [papers, questions]})
+
+
+def _history_summary(st: dict[str, Any]) -> dict[str, Any]:
+    """The compact history shown on a prediction card (the full record is the topic_history artifact)."""
+    fams = st.get("families") or []
+    return {k: st.get(k) for k in ("usable_papers", "exam_frequency", "question_frequency", "primary_questions",
+                                   "secondary_questions", "secondary_only_papers", "last_label", "last_year",
+                                   "recent_window", "recent_hits", "marks", "repetition", "provisional",
+                                   "provisional_reasons")} | {
+        "top_format": {"family": fams[0]["family"], "display": fams[0]["display"], "papers": fams[0]["papers"],
+                       "questions": fams[0]["questions"]} if fams else None,
+        "labels": (st.get("labels") or [])[:6]}
+
+
+def _attach_illustrative(guide: dict[str, Any], forms: list[dict[str, Any]]) -> None:
+    """Attach the verified practice question that matches the guide's format (and its alternatives)."""
+    if not guide:
+        return
+
+    def pick(family: str) -> dict[str, Any] | None:
+        want = FAMILY_GENERATOR_FORMAT.get(family)
+        for f in forms:
+            if want and f.get("kind") == want and f.get("basis") == "template":
+                return {"text": f["text"], "basis": "generated", "format": family,
+                        "evidence_question_ids": f.get("evidence_question_ids", []),
+                        "marks_low": f.get("marks_low"), "marks_high": f.get("marks_high"),
+                        "note": "Illustrative practice question built from the syllabus wording and this course's own "
+                                "phrasing. It passed the syllabus, topic, semantic and question-type checks. It is not "
+                                "a prediction of the exact wording."}
+        return None
+
+    if guide.get("illustrative") is None:
+        guide["illustrative"] = pick(guide.get("family", ""))
+        if guide["illustrative"] is None:
+            guide["illustrative_note"] = ("No practice question in this format passed the grounding checks; use the "
+                                          "description and the past questions instead.")
+    for alt in guide.get("alternatives", []):
+        if not alt.get("illustrative"):
+            alt["illustrative"] = pick(alt["family"])
 
 
 def _paper_scores(preds, n: int) -> np.ndarray:

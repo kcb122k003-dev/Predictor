@@ -7,9 +7,10 @@ from typing import Any
 import numpy as np
 from sqlalchemy import select
 
-from ..database.models import (AnalysisArtifact, AnalysisRun, BacktestFold, CourseTopic, Exam, ExamQuestion,
+from ..database.models import (AnalysisArtifact, AnalysisRun, BacktestFold, Course, CourseTopic, Exam, ExamQuestion,
                                ModelResult, PredictedQuestion, Prediction, QuestionTopicMapping)
 from ..generation.paper import simulate_papers
+from ..prediction.priority_reason import priority_word
 from .context import AppContext
 from .syllabus_store import current_version, to_tree, topics_of
 
@@ -31,7 +32,12 @@ def prediction_dict(p: Prediction) -> dict[str, Any]:
             "signal_contributions": ((p.features or {}).get("signal_contributions") or {}).get("values", {}),
             "signal_source": ((p.features or {}).get("signal_contributions") or {}).get("source", ""),
             "evidence": (p.evidence or {}).get("lines", []), "why_not": p.why_not or [],
-            "evidence_strength": p.evidence_strength or "", "uncertainty": p.uncertainty or {}}
+            "evidence_strength": p.evidence_strength or "", "uncertainty": p.uncertainty or {},
+            # Shared with the Syllabus Explorer: counts from the run's topic_history artifact, the question format
+            # guide and the plain-language reason for the priority (absent on runs made before they existed).
+            "priority": priority_word(p.category or ""),
+            "history": (p.features or {}).get("history"), "format_guide": (p.features or {}).get("format_guide"),
+            "priority_reason": (p.features or {}).get("priority_reason")}
 
 
 def question_dict(q: ExamQuestion, exam: Exam | None = None) -> dict[str, Any]:
@@ -65,6 +71,15 @@ class ResultsService:
                 q = q.where(AnalysisRun.status == "done")
             run = s.execute(q.order_by(AnalysisRun.id.desc())).scalars().first()
             return run.id if run else None
+
+    def freshness(self, course_id: int, run_id: int | None) -> dict[str, Any]:
+        """Whether the run still matches the course data (see services/fingerprint.py)."""
+        from .fingerprint import freshness
+
+        with self.app.db.session() as s:
+            run = s.get(AnalysisRun, run_id) if run_id else None
+            settings = self.app.course_settings(s.get(Course, course_id))
+            return freshness(s, run, settings)
 
     def run(self, run_id: int) -> dict[str, Any]:
         with self.app.db.session() as s:
